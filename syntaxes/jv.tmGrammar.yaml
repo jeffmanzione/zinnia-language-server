@@ -16,6 +16,8 @@ repository:
       - include: "#brace-expression"
       - include: "#bracket-expression"
       - include: "#string"
+      - include: "#comment"
+      - include: "#annotation"
   number:
     match: \d+\.?\d*
     name: constant.numeric.decimal
@@ -31,7 +33,7 @@ repository:
       - include: "#true"
       - include: "#false"
   control:
-    match: (import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)
+    match: ((import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?!_))
     name: keyword.control
   keyword:
     match: (def|new|field|method|class|async|exit)
@@ -46,8 +48,11 @@ repository:
     match: _*[A-Z][A-Za-z]*
     name: variable.other.constant
   function:
-    match: _*[a-z]{1}[A-Za-z0-9]*(?=\()
+    match: "[_A-Za-z0-9]+(?=\\()"
     name: entity.name.function
+  annotation:
+    match: \@[_A-Za-z0-9]+
+    name: entity.other.attribute-name
   paren-expression:
     begin: "\\("
     end: "\\)"
@@ -94,3 +99,13 @@ repository:
       "0":
         name: punctuation.definition.string.end
     name: string.quoted.single
+  comment:
+    begin: ;
+    end: \n
+    beginCaptures:
+      "0":
+        name: comment.line
+    endCaptures:
+      "0":
+        name: comment.line
+    name: comment.line

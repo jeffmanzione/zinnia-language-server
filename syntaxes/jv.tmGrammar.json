@@ -40,6 +40,12 @@
         },
         {
           "include": "#string"
+        },
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#annotation"
         }
       ]
     },
@@ -69,7 +75,7 @@
       ]
     },
     "control": {
-      "match": "(import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)",
+      "match": "((import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?!_))",
       "name": "keyword.control"
     },
     "keyword": {
@@ -89,8 +95,12 @@
       "name": "variable.other.constant"
     },
     "function": {
-      "match": "_*[a-z]{1}[A-Za-z0-9]*(?=\\()",
+      "match": "[_A-Za-z0-9]+(?=\\()",
       "name": "entity.name.function"
+    },
+    "annotation": {
+      "match": "\\@[_A-Za-z0-9]+",
+      "name": "entity.other.attribute-name"
     },
     "paren-expression": {
       "begin": "\\(",
@@ -166,6 +176,21 @@
         }
       },
       "name": "string.quoted.single"
+    },
+    "comment": {
+      "begin": ";",
+      "end": "\\n",
+      "beginCaptures": {
+        "0": {
+          "name": "comment.line"
+        }
+      },
+      "endCaptures": {
+        "0": {
+          "name": "comment.line"
+        }
+      },
+      "name": "comment.line"
     }
   }
 }
