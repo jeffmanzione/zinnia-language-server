@@ -75,11 +75,11 @@
       ]
     },
     "control": {
-      "match": "((import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?!_))",
+      "match": "((?<![\\(\\.)]{1})(import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?![_A-Za-z0-9]{1}))",
       "name": "keyword.control"
     },
     "keyword": {
-      "match": "(def|new|field|method|class|async|exit)",
+      "match": "((def|new|field|method|class|async|exit)(?=\\s))",
       "name": "keyword"
     },
     "operator": {

@@ -1,87 +1,87 @@
 {
-	"name": "jeff-vm-language-server",
-	"displayName": "jeff-vm-language-server",
-	"description": "A language server for Jeff's VM Language",
-	"publisher": "jeffreymanzione",
-	"repository": {
-		"type": "git",
-		"url": "https://github.com/jeffreymanzione/jeff-vm-language-server.git"
-	},
-	"version": "0.0.1",
-	"engines": {
-		"vscode": "^1.53.0"
-	},
-	"categories": [
-		"Other"
-	],
-	"activationEvents": [
-		"onLanguage:jeff-vm"
-	],
-	"main": "./client/extension.js",
-	"contributes": {
-		"languages": [
-			{
-				"id": "jeff-vm",
-				"extensions": [
-					".jv"
-				]
-			}
-		],
-		"grammars": [
-			{
-				"language": "jeff-vm",
-				"scopeName": "source.jv",
-				"path": "./syntaxes/jv.tmGrammar.json"
-			}
-		],
-		"configuration": {
-			"type": "object",
-			"title": "Example configuration",
-			"properties": {
-				"languageServerExample.maxNumberOfProblems": {
-					"scope": "resource",
-					"type": "number",
-					"default": 100,
-					"description": "Controls the maximum number of problems produced by the server."
-				},
-				"languageServerExample.trace.server": {
-					"scope": "window",
-					"type": "string",
-					"enum": [
-						"off",
-						"messages",
-						"verbose"
-					],
-					"default": "off",
-					"description": "Traces the communication between VS Code and the language server."
-				}
-			}
-		}
-	},
-	"scripts": {
-		"start": "node client/extension.js",
-		"compile": "npx js-yaml syntaxes/jv.tmGrammar.yaml > syntaxes/jv.tmGrammar.json",
-		"vscode:prepublish": "npm run compile",
-		"lint": "eslint .",
-		"pretest": "npm run lint",
-		"test": "node ./test/runTest.js"
-	},
-	"devDependencies": {
-		"@types/glob": "^7.1.3",
-		"@types/mocha": "^8.0.4",
-		"@types/node": "^12.11.7",
-		"@types/vscode": "^1.53.0",
-		"eslint": "^7.19.0",
-		"glob": "^7.1.6",
-		"js-yaml": "^4.0.0",
-		"mocha": "^8.2.1",
-		"typescript": "^4.1.3",
-		"vscode-test": "^1.5.0",
-		"vscode": "^1.1.37"
-	},
-	"dependencies": {
-		"vscode-languageclient": "^7.0.0",
-		"vscode-languageserver": "^7.0.0",
-		"vscode-languageserver-textdocument": "^1.0.1"
-	}
+  "name": "jeff-vm-language-server",
+  "displayName": "jeff-vm-language-server",
+  "description": "A language server for Jeff's VM Language",
+  "publisher": "jeffreymanzione",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jeffreymanzione/jeff-vm-language-server.git"
+  },
+  "version": "0.0.3",
+  "engines": {
+    "vscode": "^1.53.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onLanguage:jeff-vm"
+  ],
+  "main": "./client/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "jeff-vm",
+        "extensions": [
+          ".jv"
+        ]
+      }
+    ],
+    "grammars": [
+      {
+        "language": "jeff-vm",
+        "scopeName": "source.jv",
+        "path": "./syntaxes/jv.tmGrammar.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Example configuration",
+      "properties": {
+        "languageServerExample.maxNumberOfProblems": {
+          "scope": "resource",
+          "type": "number",
+          "default": 100,
+          "description": "Controls the maximum number of problems produced by the server."
+        },
+        "languageServerExample.trace.server": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "start": "node client/extension.js",
+    "compile": "npx js-yaml syntaxes/jv.tmGrammar.yaml > syntaxes/jv.tmGrammar.json",
+    "vscode:prepublish": "npm run compile",
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "node ./test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/glob": "^7.1.3",
+    "@types/mocha": "^8.0.4",
+    "@types/node": "^12.11.7",
+    "@types/vscode": "^1.53.0",
+    "eslint": "^7.19.0",
+    "glob": "^7.1.6",
+    "js-yaml": "^4.0.0",
+    "mocha": "^8.2.1",
+    "typescript": "^4.1.3",
+    "vscode-test": "^1.5.0",
+    "vscode": "^1.1.37"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^7.0.0",
+    "vscode-languageserver": "^7.0.0",
+    "vscode-languageserver-textdocument": "^1.0.1"
+  }
 }
