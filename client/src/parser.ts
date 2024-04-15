@@ -1,8 +1,8 @@
 import * as parsec from 'typescript-parsec';
 import { Parser, rep_sc, rule } from 'typescript-parsec';
-import { alt, alt_sc, apply, kleft, kmid, kright, list, list_sc, lrec_sc, opt_sc, seq, str, tok } from 'typescript-parsec';
+import { alt_sc, apply, kleft, kmid, kright, list_sc, lrec_sc, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { ArrayExpr, ArrayIndexExpr, BoolExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, StringExpr, TupleExpr } from './expressions';
+import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr } from './expressions';
 import { Statement, Module, ImportStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
@@ -63,7 +63,7 @@ function applyArray(tupleExpr: TupleExpr): ArrayExpr {
 	};
 }
 
-function applyMapEntry(entry: [Expression, Token, Expression]): MapEntryExpr {
+function applyMapEntry(entry: [PostfixExpr, Token, PostfixExpr]): MapEntryExpr {
 	const [key, _, value] = entry;
 	return {
 		kind: 'MapEntryExpr',
@@ -89,9 +89,11 @@ function applyNamedArg(entries: [IdentifierExpr, Token, Expression]): NamedArgEx
 	};
 }
 
-function applyFunctionCall(entries: [Token, (TupleExpr | NamedArgExpr[]), Token]): FunctionCallExpr {
+function applyFunctionCall(
+	entries: [Token, (TupleExpr | NamedArgExpr[]), Token]
+): FunctionCallExpr {
 	const [lparen, expr, rparen] = entries;
-	const args: Expression[] =
+	const args: Expression[] | NamedArgExpr[] =
 		('kind' in expr && expr.kind === 'TupleExpr')
 			? (expr as TupleExpr).values
 			: (expr as NamedArgExpr[]);
@@ -122,6 +124,79 @@ function applyMemberAccess(entries: [Token, (IdentifierExpr | NewExpr)]): Member
 	};
 }
 
+function applyEmptyParens(parens: [Token, Token]): EmptyParensExpr {
+	const [lparen, rparen] = parens;
+	return {
+		kind: 'EmptyParensExpr',
+		lparen: lparen,
+		rparen: rparen
+	};
+}
+
+function applyPostfix(
+	entry: PrimaryExpr | [PrimaryExpr, PostfixExpr1[]]
+): PostfixExpr {
+	if (isPrimaryExpr(entry)) {
+		return entry as PrimaryExpr;
+	}
+	const [primary, postfixes] = entry as [PrimaryExpr, PostfixExpr1[]];
+	if (postfixes.length == 0) {
+		return primary;
+	}
+	return {
+		kind: 'PostfixChainExpr',
+		lhs: primary,
+		postfixes: postfixes
+	};
+}
+
+function applyRange(exprs: PostfixExpr[]): RangeExpr | PostfixExpr {
+	if (exprs[1] === undefined) {
+		return exprs[0];
+	}
+	const range: RangeExpr = {
+		kind: 'RangeExpr',
+		start: exprs[0],
+		end: exprs[1],
+	};
+	if (exprs[2] !== undefined) {
+		range.inc = exprs[2];
+	}
+	return range;
+}
+
+function applyUnary(exprs: [Token[], RangeExpr | PostfixExpr]): UnaryExpr {
+	const [unaries, expr] = exprs;
+	if (unaries.length == 0) {
+		return expr;
+	}
+	return {
+		kind: 'UnaryChainExpr',
+		expr: expr,
+		unaries: unaries
+	};
+}
+
+function applyBinary(value: [BinaryExpr, [Token, BinaryExpr][]]): BinaryExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'BinaryChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
 function applyImportStat(value: Token): ImportStat {
 	return {
 		kind: 'ImportStat',
@@ -148,7 +223,7 @@ function applyModule(value: Statement[]): Module {
 // Literals and identifiers
 export const IDENTIFIER = rule<TokenKind, IdentifierExpr>();
 export const NEW = rule<TokenKind, NewExpr>();
-export const CONSTANT = rule<TokenKind, Expression>();
+export const CONSTANT = rule<TokenKind, ConstantExpr>();
 export const STRING = rule<TokenKind, StringExpr>();
 
 // Structures
@@ -158,27 +233,33 @@ export const MAP = rule<TokenKind, MapExpr>();
 export const TUPLE = rule<TokenKind, TupleExpr>();
 
 // Primary
-export const PRIMARY = rule<TokenKind, Expression>();
-export const PRIMARY_NO_CONSTANTS = rule<TokenKind, Expression>();
-export const EMPTY_PARENS = rule<TokenKind, Token[]>();
+export const PRIMARY = rule<TokenKind, PrimaryExpr>();
+export const PRIMARY_NO_CONSTANTS = rule<TokenKind, PrimaryExpr>();
+export const EMPTY_PARENS = rule<TokenKind, EmptyParensExpr>();
 
 // Postfix
-
-// Conditionals
-export const CONDITIONAL = rule<TokenKind, Expression>();
-
-// Postfix
-export const POSTFIX = rule<TokenKind, Expression>();
+export const POSTFIX = rule<TokenKind, PostfixExpr>();
+export const POSTFIX1 = rule<TokenKind, PostfixExpr1 | undefined>();
 export const NAMED_ARG = rule<TokenKind, NamedArgExpr>();
 export const FUNCTION_CALL = rule<TokenKind, FunctionCallExpr>();
 export const ARRAY_INDEX = rule<TokenKind, ArrayIndexExpr>();
 export const MEMBER_ACCESS = rule<TokenKind, MemberAccessExpr>();
 
+export const RANGE = rule<TokenKind, RangeExpr | PostfixExpr>();
+export const UNARY = rule<TokenKind, UnaryExpr>();
+export const BINARY_AND = rule<TokenKind, BinaryExpr>();
+export const BINARY_XOR = rule<TokenKind, BinaryExpr>();
+export const BINARY_OR = rule<TokenKind, BinaryExpr>();
+
+// Constructive
+export const CONDITIONAL = rule<TokenKind, Expression>();
+
 export const EXPRESSION = rule<TokenKind, Expression>();
 
-
+// Statements
 export const IMPORT = rule<TokenKind, ImportStat>();
 export const STATEMENT = rule<TokenKind, Statement>();
+
 export const MODULE = rule<TokenKind, Module>();
 
 IDENTIFIER.setPattern(
@@ -306,9 +387,12 @@ PRIMARY_NO_CONSTANTS.setPattern(
 );
 
 EMPTY_PARENS.setPattern(
-	seq(
-		tok(TokenKind.SYMBOL_LPAREN),
-		tok(TokenKind.SYMBOL_RPAREN)
+	apply(
+		seq(
+			tok(TokenKind.SYMBOL_LPAREN),
+			tok(TokenKind.SYMBOL_RPAREN)
+		),
+		applyEmptyParens
 	)
 );
 
@@ -323,7 +407,7 @@ NAMED_ARG.setPattern(
 			tok(TokenKind.SYMBOL_COLON),
 			kmid(
 				opt_sc(tok(TokenKind.NEWLINE)),
-				CONDITIONAL,
+				POSTFIX, // TODO: Change to CONDITIONAL
 				opt_sc(tok(TokenKind.NEWLINE))
 			),
 		),
@@ -369,20 +453,131 @@ MEMBER_ACCESS.setPattern(
 	)
 );
 
+POSTFIX1.setPattern(
+	alt_sc(
+		ARRAY_INDEX,
+		EMPTY_PARENS,
+		FUNCTION_CALL,
+		kmid(
+			opt_sc(tok(TokenKind.NEWLINE)),
+			MEMBER_ACCESS,
+			opt_sc(tok(TokenKind.NEWLINE))
+		)
+	)
+);
+
+POSTFIX.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				PRIMARY_NO_CONSTANTS,
+				rep_sc(POSTFIX1)
+			),
+			PRIMARY
+		),
+		applyPostfix
+	)
+);
+
+RANGE.setPattern(
+	apply(
+		seq(
+			POSTFIX,
+			opt_sc(
+				kright(
+					tok(TokenKind.SYMBOL_COLON),
+					POSTFIX
+				)
+			),
+			opt_sc(
+				kright(
+					tok(TokenKind.SYMBOL_COLON),
+					POSTFIX
+				)
+			)
+		),
+		applyRange
+	)
+);
+
+UNARY.setPattern(
+	apply(
+		seq(
+			rep_sc(
+				alt_sc(
+					tok(TokenKind.SYMBOL_TILDE),
+					tok(TokenKind.SYMBOL_EXCLAIM),
+					tok(TokenKind.SYMBOL_MINUS),
+					tok(TokenKind.KEYWORD_CONST),
+					tok(TokenKind.KEYWORD_AWAIT),
+				)
+			),
+			RANGE
+		),
+		applyUnary
+	)
+);
+
+BINARY_AND.setPattern(
+	apply(
+		seq(
+			UNARY,
+			rep_sc(
+				seq(
+					tok(TokenKind.SYMBOL_AMPER),
+					UNARY
+				)
+			)
+		),
+		applyBinary
+	)
+);
+
+BINARY_XOR.setPattern(
+	apply(
+		seq(
+			BINARY_AND,
+			rep_sc(
+				seq(
+					tok(TokenKind.SYMBOL_CARET),
+					BINARY_AND
+				)
+			)
+		),
+		applyBinary
+	)
+);
+
+BINARY_OR.setPattern(
+	apply(
+		seq(
+			BINARY_XOR,
+			rep_sc(
+				seq(
+					tok(TokenKind.SYMBOL_PIPE),
+					BINARY_XOR
+				)
+			)
+		),
+		applyBinary
+	)
+);
+
 TUPLE.setPattern(
 	apply(
-		list_sc(PRIMARY, tok(TokenKind.SYMBOL_COMMA)),
+		list_sc(
+			kmid(
+				opt_sc(tok(TokenKind.NEWLINE)),
+				POSTFIX,  // TODO: ASSIGNMENT
+				opt_sc(tok(TokenKind.NEWLINE))
+			),
+			tok(TokenKind.SYMBOL_COMMA)),
 		applyTuple
 	)
 );
 
 EXPRESSION.setPattern(
-	alt_sc(
-		ARRAY,
-		TUPLE,
-		CONSTANT,
-		IDENTIFIER
-	)
+	BINARY_OR,
 );
 
 IMPORT.setPattern(

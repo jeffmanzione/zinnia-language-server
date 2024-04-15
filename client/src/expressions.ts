@@ -46,8 +46,8 @@ export interface ArrayExpr {
 
 export interface MapEntryExpr {
 	kind: 'MapEntryExpr';
-	key: Expression;
-	value: Expression;
+	key: PostfixExpr;
+	value: PostfixExpr;
 }
 
 export interface MapExpr {
@@ -87,16 +87,87 @@ export interface MemberAccessExpr {
 	period: Token;
 }
 
-export type Expression =
-	| IdentifierExpr
+export interface EmptyParensExpr {
+	kind: 'EmptyParensExpr';
+	lparen: Token;
+	rparen: Token;
+}
+
+export interface PostfixChainExpr {
+	kind: 'PostfixChainExpr';
+	lhs: PrimaryExpr;
+	postfixes: PostfixExpr1[];
+}
+
+export interface RangeExpr {
+	kind: 'RangeExpr';
+	start: PostfixExpr;
+	end: PostfixExpr;
+	inc?: PostfixExpr;
+}
+
+export interface UnaryChainExpr {
+	kind: 'UnaryChainExpr';
+	unaries: Token[];
+	expr: RangeExpr | PostfixExpr;
+}
+
+export interface BinaryChainExpr {
+	kind: 'BinaryChainExpr';
+	tokens: Token[];
+	exprs: BinaryExpr[];
+}
+
+export type ConstantExpr =
 	| BoolExpr
 	| IntExpr
-	| FloatExpr
-	| StringExpr
-	| TupleExpr
-	| ArrayExpr
-	| MapEntryExpr
-	| MapExpr
+	| FloatExpr;
+
+export type PrimaryExpr =
+	| IdentifierExpr
 	| NewExpr
-	| NamedArgExpr
-	| ParenExpr;
+	| ConstantExpr
+	| StringExpr
+	| ArrayExpr
+	| MapExpr
+	| TupleExpr;
+
+const primaryExprs = new Set([
+	'IdentifierExpr',
+	'NewExpr',
+	'ConstantExpr',
+	'StringExpr',
+	'ArrayExpr',
+	'MapExpr',
+	'TupleExpr'
+]);
+
+export function isPrimaryExpr(expr: object): boolean {
+	if ('kind'! in expr) {
+		return false;
+	}
+	return primaryExprs.has('kind' in expr ? expr.kind as string : '');
+}
+
+export type Expression =
+	| PostfixExpr
+	| BinaryExpr;
+
+export type PostfixExpr1 =
+	| ArrayIndexExpr
+	| MemberAccessExpr
+	| EmptyParensExpr
+	| FunctionCallExpr;
+
+export type PostfixExpr =
+	| PrimaryExpr
+	| PostfixChainExpr;
+
+export type UnaryExpr =
+	| UnaryChainExpr
+	| PostfixExpr
+	| RangeExpr;
+
+export type BinaryExpr =
+	| BinaryChainExpr
+	| UnaryExpr;
