@@ -1,6 +1,6 @@
 import * as parsec from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { AssignExpr, AssignLhsExpr, ConditionExpr, Expression } from './expressions';
+import { AssignExpr, AssignLhsExpr, ConditionExpr, Expression, TupleExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -55,10 +55,51 @@ export interface CompoundStat {
 	rbrace: Token;
 }
 
+export interface SelectStat {
+	kind: 'SelectStat';
+	ifTok: Token;
+	cond: TupleExpr;
+	ifTrue: Statement;
+	elseTok?: Token;
+	ifFalse?: Statement;
+}
+
+export interface ExitStat {
+	kind: 'ExitStat';
+	exit: Token;
+	expr?: AssignExpr;
+}
+
+export interface RaiseStat {
+	kind: 'RaiseStat';
+	raise: Token;
+	expr: AssignExpr;
+}
+
+export interface TryStat {
+	kind: 'TryStat';
+	tryTok: Token;
+	stat: Statement;
+	catchTok: Token;
+	catchAssign: AssignLhsExpr;
+	catchStat: Statement;
+}
+
+export interface JumpStat {
+	kind: 'JumpStat';
+	token: Token;
+	expr?: TupleExpr;
+}
+
 export type Statement =
 	| IterStat
 	| ImportStat
 	| CompoundStat
+	| SelectStat
+	| ExitStat
+	| RaiseStat
+	| TryStat
+	| JumpStat
 	| Expression;
 
 export interface Module {

@@ -3,7 +3,7 @@ import { Parser, rep_sc, rule } from 'typescript-parsec';
 import { alt_sc, apply, kleft, kmid, kright, list_sc, lrec_sc, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
 import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr } from './expressions';
-import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat } from './statements';
+import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -50,6 +50,9 @@ function applyNew(value: Token): NewExpr {
 }
 
 function applyTuple(exprs: Expression[]): TupleExpr {
+	if (exprs.length == 1) {
+		return exprs[0];
+	}
 	return {
 		kind: 'TupleChainExpr',
 		values: exprs
@@ -534,6 +537,78 @@ function applyCompound(expr: [Token, Statement[], Token]): CompoundStat {
 	};
 }
 
+function applySelect(
+	expr: [Token, TupleExpr, Statement, [Token, Statement]?]
+): SelectStat {
+	if (expr[3] !== undefined) {
+		const [ifTok, cond, ifTrue, [elseTok, ifFalse]] = expr;
+		return {
+			kind: 'SelectStat',
+			ifTok: ifTok,
+			cond: cond,
+			ifTrue: ifTrue,
+			elseTok: elseTok,
+			ifFalse: ifFalse
+		};
+	}
+	const [ifTok, cond, ifTrue] = expr;
+	return {
+		kind: 'SelectStat',
+		ifTok: ifTok,
+		cond: cond,
+		ifTrue: ifTrue
+	};
+}
+
+function applyExit(expr: [Token, AssignExpr?]): ExitStat {
+	const [exit, val] = expr;
+	return {
+		kind: 'ExitStat',
+		exit: exit,
+		expr: val
+	};
+}
+
+function applyRaise(expr: [Token, AssignExpr]): RaiseStat {
+	const [raise, val] = expr;
+	return {
+		kind: 'RaiseStat',
+		raise: raise,
+		expr: val
+	};
+}
+
+function applyTry(
+	expr: [Token, Statement, Token, AssignLhsExpr, Statement]
+): TryStat {
+	const [tryTok, stat, catchTok, catchAssign, catchStat] = expr;
+	return {
+		kind: 'TryStat',
+		tryTok: tryTok,
+		stat: stat,
+		catchTok: catchTok,
+		catchAssign: catchAssign,
+		catchStat: catchStat
+	};
+}
+
+function applyJump(
+	expr: [Token, TupleExpr] | Token
+): JumpStat {
+	if ('text' in expr) {
+		return {
+			kind: 'JumpStat',
+			token: expr as Token
+		};
+	}
+	const [ret, retVal] = expr;
+	return {
+		kind: 'JumpStat',
+		token: ret,
+		expr: retVal
+	};
+}
+
 function applyImportStat(value: Token): ImportStat {
 	return {
 		kind: 'ImportStat',
@@ -609,6 +684,8 @@ export const ASSIGN_LHS = rule<TokenKind, AssignLhsExpr>();
 
 // Statements
 
+export const STATEMENT = rule<TokenKind, Statement>();
+
 // Iterative
 export const FOREACH = rule<TokenKind, ForeachStat>();
 export const FOR = rule<TokenKind, ForStat>();
@@ -616,10 +693,13 @@ export const WHILE = rule<TokenKind, WhileStat>();
 export const ITER = rule<TokenKind, IterStat>();
 
 export const COMPOUND = rule<TokenKind, CompoundStat>();
+export const SELECT = rule<TokenKind, SelectStat>();
+export const EXIT = rule<TokenKind, ExitStat>();
+export const RAISE = rule<TokenKind, RaiseStat>();
+export const TRY = rule<TokenKind, TryStat>();
+export const JUMP = rule<TokenKind, JumpStat>();
 
 export const IMPORT = rule<TokenKind, ImportStat>();
-
-export const STATEMENT = rule<TokenKind, Statement>();
 
 export const MODULE = rule<TokenKind, Module>();
 
@@ -1251,6 +1331,89 @@ COMPOUND.setPattern(
 	)
 );
 
+SELECT.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.KEYWORD_IF),
+			TUPLE,
+			STATEMENT,
+			opt_sc(
+				seq(
+					tok(TokenKind.KEYWORD_ELSE),
+					STATEMENT
+				)
+			)
+		),
+		applySelect
+	)
+);
+
+EXIT.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.KEYWORD_EXIT),
+			opt_sc(ASSIGN)
+		),
+		applyExit
+	)
+);
+
+RAISE.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.KEYWORD_RAISE),
+			ASSIGN
+		),
+		applyRaise
+	)
+);
+
+TRY.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.KEYWORD_TRY),
+			STATEMENT,
+			tok(TokenKind.KEYWORD_CATCH),
+			alt_sc(
+				kmid(
+					tok(TokenKind.SYMBOL_LPAREN),
+					ASSIGN_LHS,
+					tok(TokenKind.SYMBOL_RPAREN)
+				),
+				ASSIGN_LHS
+			),
+			STATEMENT
+		),
+		applyTry
+	)
+);
+
+JUMP.setPattern(
+	apply(
+		kmid(
+			opt_sc(tok(TokenKind.NEWLINE)),
+			alt_sc(
+				seq(
+					tok(TokenKind.KEYWORD_RETURN),
+					alt_sc(
+						kmid(
+							tok(TokenKind.SYMBOL_LPAREN),
+							TUPLE,
+							tok(TokenKind.SYMBOL_RPAREN)
+						),
+						TUPLE
+					)
+				),
+				tok(TokenKind.KEYWORD_RETURN),
+				tok(TokenKind.KEYWORD_BREAK),
+				tok(TokenKind.KEYWORD_CONTINUE)
+			),
+			opt_sc(tok(TokenKind.NEWLINE))
+		),
+		applyJump
+	)
+);
+
 IMPORT.setPattern(
 	alt_sc(
 		apply(
@@ -1282,6 +1445,9 @@ STATEMENT.setPattern(
 		alt_sc(
 			COMPOUND,
 			ITER,
+			SELECT,
+			TRY,
+			JUMP,
 			IMPORT,
 			EXPRESSION
 		),
