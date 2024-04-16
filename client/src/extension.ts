@@ -20,7 +20,7 @@ import {
 } from 'vscode-languageclient/node';
 
 import { zinniaTokenizer } from './tokenizer';
-import { CONSTANT, EXPRESSION, MODULE, POSTFIX } from './parser';
+import { ASSIGN_LHS, CONSTANT, EXPRESSION, MODULE, POSTFIX, PRIMARY } from './parser';
 import { expectEOF, expectSingleResult } from 'typescript-parsec';
 
 let client: LanguageClient;

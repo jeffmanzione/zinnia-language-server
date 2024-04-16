@@ -2,8 +2,8 @@ import * as parsec from 'typescript-parsec';
 import { Parser, rep_sc, rule } from 'typescript-parsec';
 import { alt_sc, apply, kleft, kmid, kright, list_sc, lrec_sc, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr } from './expressions';
-import { Statement, Module, ImportStat } from './statements';
+import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr } from './expressions';
+import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -51,15 +51,19 @@ function applyNew(value: Token): NewExpr {
 
 function applyTuple(exprs: Expression[]): TupleExpr {
 	return {
-		kind: 'TupleExpr',
+		kind: 'TupleChainExpr',
 		values: exprs
 	};
 }
 
 function applyArray(tupleExpr: TupleExpr): ArrayExpr {
+	const values =
+		tupleExpr.kind === 'TupleChainExpr'
+			? tupleExpr.values
+			: [tupleExpr];
 	return {
 		kind: 'ArrayExpr',
-		values: tupleExpr.values
+		values: values
 	};
 }
 
@@ -94,8 +98,8 @@ function applyFunctionCall(
 ): FunctionCallExpr {
 	const [lparen, expr, rparen] = entries;
 	const args: Expression[] | NamedArgExpr[] =
-		('kind' in expr && expr.kind === 'TupleExpr')
-			? (expr as TupleExpr).values
+		('kind' in expr && expr.kind === 'TupleChainExpr')
+			? (expr as TupleChainExpr).values
 			: (expr as NamedArgExpr[]);
 	return {
 		kind: 'FunctionCallExpr',
@@ -128,6 +132,16 @@ function applyEmptyParens(parens: [Token, Token]): EmptyParensExpr {
 	const [lparen, rparen] = parens;
 	return {
 		kind: 'EmptyParensExpr',
+		lparen: lparen,
+		rparen: rparen
+	};
+}
+
+function applyParens(expr: [Token, TupleExpr, Token]): ParensExpr {
+	const [lparen, tupExpr, rparen] = expr;
+	return {
+		kind: 'ParensExpr',
+		expr: tupExpr,
 		lparen: lparen,
 		rparen: rparen
 	};
@@ -345,6 +359,181 @@ function applyIs(expr: [OrExpr, Token, OrExpr] | OrExpr): IsExpr | OrExpr {
 	};
 }
 
+function applyCondition(
+	expr:
+		[Token, IsExpr | OrExpr, Token, ConditionExpr, Token, ConditionExpr] |
+		[Token, IsExpr | OrExpr, Token, ConditionExpr] |
+		IsExpr | OrExpr
+): ConditionExpr {
+	if ('kind' in expr) {
+		return expr;
+	}
+	if (expr.length == 6) {
+		const [_if, cond, _then, ifTrue, _else, ifFalse] = expr;
+		return {
+			kind: 'ConditionBaseExpr',
+			if: _if,
+			condition: cond,
+			then: _then,
+			ifTrue: ifTrue,
+			else: _else,
+			ifFalse: ifFalse,
+		};
+	}
+	// Must be length 4.
+	const [_if, cond, _then, ifTrue] = expr;
+	return {
+		kind: 'ConditionBaseExpr',
+		if: _if,
+		condition: cond,
+		then: _then,
+		ifTrue: ifTrue,
+	};
+}
+
+function applyAssignTuple(expr: [Token, AssignLhsExpr[], Token]): AssignTupleExpr {
+	const [lparen, assigns, rparen] = expr;
+	return {
+		kind: 'AssignTupleExpr',
+		assigns: assigns,
+		lparen: lparen,
+		rparen: rparen
+	};
+}
+
+function applyAssignArray(expr: [Token, AssignLhsExpr[], Token]): AssignArrayExpr {
+	const [lbrack, assigns, rbrack] = expr;
+	return {
+		kind: 'AssignArrayExpr',
+		assigns: assigns,
+		lbrack: lbrack,
+		rbrack: rbrack
+	};
+}
+
+function applyAssignLhs(
+	expr:
+		AssignTupleExpr |
+		AssignArrayExpr |
+		IdentifierExpr
+): AssignLhsExpr {
+	return expr;
+}
+
+function applyAssign(
+	expr:
+		[AssignLhsExpr, Token, ConditionExpr] |
+		ConditionExpr
+): AssignExpr {
+	if ('kind' in expr) {
+		return expr as ConditionExpr;
+	}
+	const [lhs, eq, rhs] = expr;
+	return {
+		kind: 'AssignBaseExpr',
+		lhs: lhs,
+		rhs: rhs,
+		eq: eq
+	};
+}
+
+function applyForeach(
+	expr:
+		[Token, Token, AssignLhsExpr, Token, ConditionExpr, Token, Statement] |
+		[Token, AssignLhsExpr, Token, ConditionExpr, Statement]
+): ForeachStat {
+	if (expr.length == 7) {
+		const [forTok, lparen, lhs, inTok, iter, rparen, stat] = expr;
+		return {
+			kind: 'ForeachStat',
+			forTok: forTok,
+			lparen: lparen,
+			lhs: lhs,
+			inTok: inTok,
+			iter: iter,
+			rparen: rparen,
+			stat: stat
+		};
+	}
+	const [forTok, lhs, inTok, iter, stat] = expr;
+	return {
+		kind: 'ForeachStat',
+		forTok: forTok,
+		lhs: lhs,
+		inTok: inTok,
+		iter: iter,
+		stat: stat
+	};
+}
+
+function applyFor(
+	expr:
+		[Token, Token, AssignExpr, Token, ConditionExpr, Token, AssignExpr, Token, Statement] |
+		[Token, AssignExpr, Token, ConditionExpr, Token, AssignExpr, Statement]
+): ForStat {
+	if (expr.length == 9) {
+		const [forTok, lparen, first, comma1, second, comma2, third, rparen, stat] = expr;
+		return {
+			kind: 'ForStat',
+			forTok: forTok,
+			lparen: lparen,
+			first: first,
+			comma1: comma1,
+			second: second,
+			comma2: comma2,
+			third: third,
+			rparen: rparen,
+			stat: stat
+		};
+	}
+	const [forTok, first, comma1, second, comma2, third, stat] = expr;
+	return {
+		kind: 'ForStat',
+		forTok: forTok,
+		first: first,
+		comma1: comma1,
+		second: second,
+		comma2: comma2,
+		third: third,
+		stat: stat
+	};
+}
+
+function applyWhile(
+	expr:
+		[Token, Token, ConditionExpr, Token, Statement] |
+		[Token, ConditionExpr, Statement]
+): WhileStat {
+	if (expr.length == 5) {
+		const [whileTok, lparen, cond, rparen, stat] = expr;
+		return {
+			kind: 'WhileStat',
+			whileTok: whileTok,
+			lparen: lparen,
+			cond: cond,
+			rparen: rparen,
+			stat: stat
+		};
+	}
+	const [whileTok, cond, stat] = expr;
+	return {
+		kind: 'WhileStat',
+		whileTok: whileTok,
+		cond: cond,
+		stat: stat
+	};
+}
+
+function applyCompound(expr: [Token, Statement[], Token]): CompoundStat {
+	const [lbrace, stats, rbrace] = expr;
+	return {
+		kind: 'CompoundStat',
+		lbrace: lbrace,
+		stats: stats,
+		rbrace: rbrace
+	};
+}
+
 function applyImportStat(value: Token): ImportStat {
 	return {
 		kind: 'ImportStat',
@@ -368,6 +557,10 @@ function applyModule(value: Statement[]): Module {
 	};
 }
 
+// Expressions
+
+export const EXPRESSION = rule<TokenKind, Expression>();
+
 // Literals and identifiers
 export const IDENTIFIER = rule<TokenKind, IdentifierExpr>();
 export const NEW = rule<TokenKind, NewExpr>();
@@ -383,11 +576,11 @@ export const TUPLE = rule<TokenKind, TupleExpr>();
 // Primary
 export const PRIMARY = rule<TokenKind, PrimaryExpr>();
 export const PRIMARY_NO_CONSTANTS = rule<TokenKind, PrimaryExpr>();
+export const PARENS = rule<TokenKind, ParensExpr>();
 export const EMPTY_PARENS = rule<TokenKind, EmptyParensExpr>();
 
 // Postfix
 export const POSTFIX = rule<TokenKind, PostfixExpr>();
-export const POSTFIX1 = rule<TokenKind, PostfixExpr1 | undefined>();
 export const NAMED_ARG = rule<TokenKind, NamedArgExpr>();
 export const FUNCTION_CALL = rule<TokenKind, FunctionCallExpr>();
 export const ARRAY_INDEX = rule<TokenKind, ArrayIndexExpr>();
@@ -406,14 +599,26 @@ export const EQUAL = rule<TokenKind, EqualExpr>();
 export const AND = rule<TokenKind, AndExpr>();
 export const OR = rule<TokenKind, OrExpr>();
 export const IS = rule<TokenKind, IsExpr | OrExpr>();
+export const CONDITION = rule<TokenKind, ConditionExpr>();
 
-// Constructive
-export const CONDITIONAL = rule<TokenKind, Expression>();
-
-export const EXPRESSION = rule<TokenKind, Expression>();
+// Assignment
+export const ASSIGN = rule<TokenKind, AssignExpr>();
+export const ASSIGN_TUPLE = rule<TokenKind, AssignTupleExpr>();
+export const ASSIGN_ARRAY = rule<TokenKind, AssignArrayExpr>();
+export const ASSIGN_LHS = rule<TokenKind, AssignLhsExpr>();
 
 // Statements
+
+// Iterative
+export const FOREACH = rule<TokenKind, ForeachStat>();
+export const FOR = rule<TokenKind, ForStat>();
+export const WHILE = rule<TokenKind, WhileStat>();
+export const ITER = rule<TokenKind, IterStat>();
+
+export const COMPOUND = rule<TokenKind, CompoundStat>();
+
 export const IMPORT = rule<TokenKind, ImportStat>();
+
 export const STATEMENT = rule<TokenKind, Statement>();
 
 export const MODULE = rule<TokenKind, Module>();
@@ -510,6 +715,17 @@ MAP.setPattern(
 	)
 );
 
+PARENS.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.SYMBOL_LPAREN),
+			TUPLE,
+			tok(TokenKind.SYMBOL_RPAREN)
+		),
+		applyParens
+	)
+);
+
 PRIMARY.setPattern(
 	alt_sc(
 		// ANON_FUNCTION_DEFINITION,
@@ -519,11 +735,7 @@ PRIMARY.setPattern(
 		STRING,
 		ARRAY,
 		MAP,
-		kmid(
-			tok(TokenKind.SYMBOL_LPAREN),
-			TUPLE,
-			tok(TokenKind.SYMBOL_RPAREN)
-		)
+		PARENS
 	)
 );
 
@@ -534,11 +746,7 @@ PRIMARY_NO_CONSTANTS.setPattern(
 		STRING,
 		ARRAY,
 		MAP,
-		kmid(
-			tok(TokenKind.SYMBOL_LPAREN),
-			TUPLE,
-			tok(TokenKind.SYMBOL_RPAREN)
-		)
+		PARENS
 	)
 );
 
@@ -563,7 +771,7 @@ NAMED_ARG.setPattern(
 			tok(TokenKind.SYMBOL_COLON),
 			kmid(
 				opt_sc(tok(TokenKind.NEWLINE)),
-				POSTFIX, // TODO: Change to CONDITIONAL
+				CONDITION,
 				opt_sc(tok(TokenKind.NEWLINE))
 			),
 		),
@@ -609,25 +817,24 @@ MEMBER_ACCESS.setPattern(
 	)
 );
 
-POSTFIX1.setPattern(
-	alt_sc(
-		ARRAY_INDEX,
-		EMPTY_PARENS,
-		FUNCTION_CALL,
-		kmid(
-			opt_sc(tok(TokenKind.NEWLINE)),
-			MEMBER_ACCESS,
-			opt_sc(tok(TokenKind.NEWLINE))
-		)
-	)
-);
 
 POSTFIX.setPattern(
 	apply(
 		alt_sc(
 			seq(
 				PRIMARY_NO_CONSTANTS,
-				rep_sc(POSTFIX1)
+				rep_sc(
+					kmid(
+						opt_sc(tok(TokenKind.NEWLINE)),
+						alt_sc(
+							ARRAY_INDEX,
+							EMPTY_PARENS,
+							FUNCTION_CALL,
+							MEMBER_ACCESS,
+						),
+						opt_sc(tok(TokenKind.NEWLINE))
+					)
+				)
 			),
 			PRIMARY
 		),
@@ -855,12 +1062,83 @@ IS.setPattern(
 	)
 );
 
+CONDITION.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				tok(TokenKind.KEYWORD_IF),
+				IS,
+				opt_sc(tok(TokenKind.KEYWORD_THEN)),
+				CONDITION,
+				tok(TokenKind.KEYWORD_ELSE),
+				CONDITION
+			),
+			seq(
+				tok(TokenKind.KEYWORD_IF),
+				IS,
+				opt_sc(tok(TokenKind.KEYWORD_THEN)),
+				CONDITION,
+			),
+			IS
+		),
+		applyCondition
+	)
+);
+
+ASSIGN_TUPLE.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.SYMBOL_LPAREN),
+			list_sc(ASSIGN_LHS, tok(TokenKind.SYMBOL_COMMA)),
+			tok(TokenKind.SYMBOL_RPAREN)
+		),
+		applyAssignTuple
+	)
+);
+
+ASSIGN_ARRAY.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.SYMBOL_LBRACKET),
+			list_sc(ASSIGN_LHS, tok(TokenKind.SYMBOL_COMMA)),
+			tok(TokenKind.SYMBOL_RBRACKET)
+		),
+		applyAssignArray
+	)
+);
+
+ASSIGN_LHS.setPattern(
+	apply(
+		alt_sc(
+			ASSIGN_TUPLE,
+			ASSIGN_ARRAY,
+			POSTFIX,
+			IDENTIFIER
+		),
+		applyAssignLhs
+	)
+);
+
+ASSIGN.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				ASSIGN_LHS,
+				tok(TokenKind.SYMBOL_EQUALS),
+				CONDITION
+			),
+			CONDITION
+		),
+		applyAssign
+	)
+);
+
 TUPLE.setPattern(
 	apply(
 		list_sc(
 			kmid(
 				opt_sc(tok(TokenKind.NEWLINE)),
-				IS,  // TODO: ASSIGNMENT
+				ASSIGN,
 				opt_sc(tok(TokenKind.NEWLINE))
 			),
 			tok(TokenKind.SYMBOL_COMMA)),
@@ -869,7 +1147,108 @@ TUPLE.setPattern(
 );
 
 EXPRESSION.setPattern(
-	IS
+	kmid(
+		opt_sc(tok(TokenKind.NEWLINE)),
+		ASSIGN,
+		opt_sc(tok(TokenKind.NEWLINE))
+	)
+);
+
+FOREACH.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				tok(TokenKind.KEYWORD_FOR),
+				tok(TokenKind.SYMBOL_LPAREN),
+				ASSIGN_LHS,
+				tok(TokenKind.KEYWORD_IN),
+				CONDITION,
+				tok(TokenKind.SYMBOL_RPAREN),
+				STATEMENT
+			),
+			seq(
+				tok(TokenKind.KEYWORD_FOR),
+				ASSIGN_LHS,
+				tok(TokenKind.KEYWORD_IN),
+				CONDITION,
+				STATEMENT
+			),
+		),
+		applyForeach
+	)
+);
+
+FOR.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				tok(TokenKind.KEYWORD_FOR),
+				tok(TokenKind.SYMBOL_LPAREN),
+				ASSIGN,
+				tok(TokenKind.SYMBOL_COMMA),
+				CONDITION,
+				tok(TokenKind.SYMBOL_COMMA),
+				ASSIGN,
+				tok(TokenKind.SYMBOL_RPAREN),
+				STATEMENT
+			),
+			seq(
+				tok(TokenKind.KEYWORD_FOR),
+				ASSIGN,
+				tok(TokenKind.SYMBOL_COMMA),
+				CONDITION,
+				tok(TokenKind.SYMBOL_COMMA),
+				ASSIGN,
+				STATEMENT
+			),
+		),
+		applyFor
+	)
+);
+
+WHILE.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				tok(TokenKind.KEYWORD_WHILE),
+				tok(TokenKind.SYMBOL_LPAREN),
+				CONDITION,
+				tok(TokenKind.SYMBOL_RPAREN),
+				STATEMENT
+			),
+			seq(
+				tok(TokenKind.KEYWORD_WHILE),
+				CONDITION,
+				STATEMENT
+			),
+		),
+		applyWhile
+	)
+);
+
+ITER.setPattern(
+	alt_sc(
+		FOREACH,
+		FOR,
+		WHILE
+	)
+);
+
+COMPOUND.setPattern(
+	apply(
+		seq(
+			kleft(
+				tok(TokenKind.SYMBOL_LBRACE),
+				opt_sc(tok(TokenKind.NEWLINE)),
+			),
+			rep_sc(STATEMENT),
+			kright(
+				opt_sc(tok(TokenKind.NEWLINE)),
+				tok(TokenKind.SYMBOL_RBRACE)
+			)
+		),
+		applyCompound
+	)
 );
 
 IMPORT.setPattern(
@@ -898,8 +1277,11 @@ IMPORT.setPattern(
 );
 
 STATEMENT.setPattern(
-	kleft(
+	kmid(
+		opt_sc(tok(TokenKind.NEWLINE)),
 		alt_sc(
+			COMPOUND,
+			ITER,
 			IMPORT,
 			EXPRESSION
 		),

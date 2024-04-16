@@ -94,8 +94,8 @@ export enum TokenKind {
 
 export const zinniaTokenizer = buildLexer([
 	[true, /^'([^']|\\.)*'/g, TokenKind.LITERAL_STRING],
-	[true, /^[+-]?\d+/g, TokenKind.LITEARL_INTEGER],
-	[true, /^[+-]?\d+(\.\d+)?/g, TokenKind.LITEARL_FLOAT],
+	[true, /^-?\d+/g, TokenKind.LITEARL_INTEGER],
+	[true, /^-?\d+(\.\d+)?/g, TokenKind.LITEARL_FLOAT],
 
 	[true, /^abstract/g, TokenKind.KEYWORD_ABSTRACT],
 	[true, /^and/g, TokenKind.KEYWORD_AND],
@@ -145,7 +145,7 @@ export const zinniaTokenizer = buildLexer([
 	[true, /^\(/g, TokenKind.SYMBOL_LPAREN],
 	[true, /^\)/g, TokenKind.SYMBOL_RPAREN],
 	[true, /^\{/g, TokenKind.SYMBOL_LBRACE],
-	[true, /^\}/g, TokenKind.SYMBOL_RPAREN],
+	[true, /^\}/g, TokenKind.SYMBOL_RBRACE],
 	[true, /^\[/g, TokenKind.SYMBOL_LBRACKET],
 	[true, /^\]/g, TokenKind.SYMBOL_RBRACKET],
 	[true, /^->/g, TokenKind.SYMBOL_RARROW],

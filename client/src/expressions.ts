@@ -34,8 +34,8 @@ export interface NewExpr {
 	token: Token;
 }
 
-export interface TupleExpr {
-	kind: 'TupleExpr';
+export interface TupleChainExpr {
+	kind: 'TupleChainExpr';
 	values: Expression[];
 }
 
@@ -53,11 +53,6 @@ export interface MapEntryExpr {
 export interface MapExpr {
 	kind: 'MapExpr';
 	entries: MapEntryExpr[];
-}
-
-export interface ParenExpr {
-	kind: 'ParenExpr';
-	expr: Expression;
 }
 
 export interface NamedArgExpr {
@@ -89,6 +84,13 @@ export interface MemberAccessExpr {
 
 export interface EmptyParensExpr {
 	kind: 'EmptyParensExpr';
+	lparen: Token;
+	rparen: Token;
+}
+
+export interface ParensExpr {
+	kind: 'ParensExpr';
+	expr: Expression;
 	lparen: Token;
 	rparen: Token;
 }
@@ -168,6 +170,42 @@ export interface IsExpr {
 	is: Token;
 }
 
+export interface ConditionBaseExpr {
+	kind: 'ConditionBaseExpr';
+	if: Token;
+	condition: IsExpr | OrExpr;
+	then?: Token;
+	ifTrue: ConditionExpr;
+	else?: Token;
+	ifFalse?: ConditionExpr;
+}
+
+export interface AssignTupleExpr {
+	kind: 'AssignTupleExpr';
+	assigns: AssignLhsExpr[];
+	lparen: Token;
+	rparen: Token;
+}
+
+export interface AssignArrayExpr {
+	kind: 'AssignArrayExpr';
+	assigns: AssignLhsExpr[];
+	lbrack: Token;
+	rbrack: Token;
+}
+
+export type AssignLhsExpr =
+	| IdentifierExpr
+	| AssignTupleExpr
+	| AssignArrayExpr;
+
+export interface AssignBaseExpr {
+	kind: 'AssignBaseExpr';
+	lhs: AssignLhsExpr;
+	rhs: ConditionExpr;
+	eq: Token;
+}
+
 export type ConstantExpr =
 	| BoolExpr
 	| IntExpr
@@ -180,12 +218,14 @@ export type PrimaryExpr =
 	| StringExpr
 	| ArrayExpr
 	| MapExpr
-	| TupleExpr;
+	| ParensExpr;
 
 const primaryExprs = new Set([
 	'IdentifierExpr',
 	'NewExpr',
-	'ConstantExpr',
+	'IntExpr',
+	'FloatExpr',
+	'BoolExpr',
 	'StringExpr',
 	'ArrayExpr',
 	'MapExpr',
@@ -193,7 +233,7 @@ const primaryExprs = new Set([
 ]);
 
 export function isPrimaryExpr(expr: object): boolean {
-	if ('kind'! in expr) {
+	if (!('kind' in expr)) {
 		return false;
 	}
 	return primaryExprs.has('kind' in expr ? expr.kind as string : '');
@@ -202,8 +242,7 @@ export function isPrimaryExpr(expr: object): boolean {
 export type Expression =
 	| PostfixExpr
 	| BinaryExpr
-	| OrExpr
-	| IsExpr;
+	| TupleExpr;
 
 export type PostfixExpr1 =
 	| ArrayIndexExpr
@@ -248,3 +287,16 @@ export type AndExpr =
 export type OrExpr =
 	| OrChainExpr
 	| AndExpr;
+
+export type ConditionExpr =
+	| ConditionBaseExpr
+	| IsExpr
+	| OrExpr;
+
+export type AssignExpr =
+	| AssignBaseExpr
+	| ConditionExpr;
+
+export type TupleExpr =
+	| TupleChainExpr
+	| AssignExpr;
