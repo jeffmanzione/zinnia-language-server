@@ -2,7 +2,7 @@ import * as parsec from 'typescript-parsec';
 import { Parser, rep_sc, rule } from 'typescript-parsec';
 import { alt_sc, apply, kleft, kmid, kright, list_sc, lrec_sc, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr } from './expressions';
+import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr } from './expressions';
 import { Statement, Module, ImportStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
@@ -197,6 +197,154 @@ function applyBinary(value: [BinaryExpr, [Token, BinaryExpr][]]): BinaryExpr {
 	};
 }
 
+function applyMult(value: [BinaryExpr, [Token, BinaryExpr][]]): MultExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'MultChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
+function applyAdd(value: [MultExpr, [Token, MultExpr][]]): AddExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'AddChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
+function applyIn(
+	expr: [AddExpr, Token, AddExpr] | AddExpr
+): InExpr | AddExpr {
+	if ('kind' in expr) {
+		return expr as AddExpr;
+	}
+	const [lhs, is, rhs] = expr;
+	return {
+		kind: 'InExpr',
+		lhs: lhs,
+		rhs: rhs,
+		is: is
+	};
+}
+
+function applyRelation(value: [InExpr | AddExpr, [Token, InExpr | AddExpr][]]): RelationExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'RelationChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
+function applyEqual(value: [RelationExpr, [Token, RelationExpr][]]): EqualExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'EqualChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
+function applyAnd(value: [EqualExpr, [Token, EqualExpr][]]): AndExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'AndChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
+function applyOr(value: [AndExpr, [Token, AndExpr][]]): OrExpr {
+	const [lhs, rhs] = value;
+
+	if (rhs.length == 0) {
+		return lhs;
+	}
+
+	const exprs = [lhs];
+	const tokens = [];
+	for (const [tok, expr] of rhs) {
+		exprs.push(expr);
+		tokens.push(tok);
+	}
+	return {
+		kind: 'OrChainExpr',
+		exprs: exprs,
+		tokens: tokens
+	};
+}
+
+function applyIs(expr: [OrExpr, Token, OrExpr] | OrExpr): IsExpr | OrExpr {
+	if ('kind' in expr) {
+		return expr;
+	}
+	const [lhs, is, rhs] = expr;
+	return {
+		kind: 'IsExpr',
+		lhs: lhs,
+		rhs: rhs,
+		is: is
+	};
+}
+
 function applyImportStat(value: Token): ImportStat {
 	return {
 		kind: 'ImportStat',
@@ -250,6 +398,14 @@ export const UNARY = rule<TokenKind, UnaryExpr>();
 export const BINARY_AND = rule<TokenKind, BinaryExpr>();
 export const BINARY_XOR = rule<TokenKind, BinaryExpr>();
 export const BINARY_OR = rule<TokenKind, BinaryExpr>();
+export const MULT = rule<TokenKind, MultExpr>();
+export const ADD = rule<TokenKind, AddExpr>();
+export const IN = rule<TokenKind, InExpr | AddExpr>();
+export const RELATION = rule<TokenKind, RelationExpr>();
+export const EQUAL = rule<TokenKind, EqualExpr>();
+export const AND = rule<TokenKind, AndExpr>();
+export const OR = rule<TokenKind, OrExpr>();
+export const IS = rule<TokenKind, IsExpr | OrExpr>();
 
 // Constructive
 export const CONDITIONAL = rule<TokenKind, Expression>();
@@ -563,12 +719,148 @@ BINARY_OR.setPattern(
 	)
 );
 
+MULT.setPattern(
+	apply(
+		seq(
+			BINARY_OR,
+			rep_sc(
+				seq(
+					alt_sc(
+						tok(TokenKind.SYMBOL_STAR),
+						tok(TokenKind.SYMBOL_FSLASH),
+						tok(TokenKind.SYMBOL_PERCENT)
+					),
+					BINARY_OR
+				)
+			)
+		),
+		applyMult
+	)
+);
+
+ADD.setPattern(
+	apply(
+		seq(
+			MULT,
+			rep_sc(
+				seq(
+					alt_sc(
+						tok(TokenKind.SYMBOL_PLUS),
+						tok(TokenKind.SYMBOL_MINUS),
+					),
+					MULT
+				)
+			)
+		),
+		applyAdd
+	)
+);
+
+IN.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				ADD,
+				alt_sc(
+					tok(TokenKind.KEYWORD_IN),
+					tok(TokenKind.KEYWORD_NOTIN)
+				),
+				ADD
+			),
+			ADD
+		),
+		applyIn
+	)
+);
+
+RELATION.setPattern(
+	apply(
+		seq(
+			IN,
+			rep_sc(
+				seq(
+					alt_sc(
+						tok(TokenKind.SYMBOL_LTHAN),
+						tok(TokenKind.SYMBOL_GTHAN),
+						tok(TokenKind.SYMBOL_LTHANEQ),
+						tok(TokenKind.SYMBOL_GTHANEQ)
+					),
+					IN
+				)
+			)
+		),
+		applyRelation
+	)
+);
+
+EQUAL.setPattern(
+	apply(
+		seq(
+			RELATION,
+			rep_sc(
+				seq(
+					alt_sc(
+						tok(TokenKind.SYMBOL_EQUIV),
+						tok(TokenKind.SYMBOL_NEQUIV),
+					),
+					RELATION
+				)
+			)
+		),
+		applyEqual
+	)
+);
+
+AND.setPattern(
+	apply(
+		seq(
+			EQUAL,
+			rep_sc(
+				seq(
+					tok(TokenKind.KEYWORD_AND),
+					EQUAL
+				)
+			)
+		),
+		applyAnd
+	)
+);
+
+OR.setPattern(
+	apply(
+		seq(
+			AND,
+			rep_sc(
+				seq(
+					tok(TokenKind.KEYWORD_OR),
+					AND
+				)
+			)
+		),
+		applyOr
+	)
+);
+
+IS.setPattern(
+	apply(
+		alt_sc(
+			seq(
+				OR,
+				tok(TokenKind.KEYWORD_IS),
+				OR
+			),
+			OR
+		),
+		applyIs
+	)
+);
+
 TUPLE.setPattern(
 	apply(
 		list_sc(
 			kmid(
 				opt_sc(tok(TokenKind.NEWLINE)),
-				POSTFIX,  // TODO: ASSIGNMENT
+				IS,  // TODO: ASSIGNMENT
 				opt_sc(tok(TokenKind.NEWLINE))
 			),
 			tok(TokenKind.SYMBOL_COMMA)),
@@ -577,7 +869,7 @@ TUPLE.setPattern(
 );
 
 EXPRESSION.setPattern(
-	BINARY_OR,
+	IS
 );
 
 IMPORT.setPattern(

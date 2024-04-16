@@ -118,6 +118,56 @@ export interface BinaryChainExpr {
 	exprs: BinaryExpr[];
 }
 
+export interface MultChainExpr {
+	kind: 'MultChainExpr';
+	tokens: Token[];
+	exprs: BinaryExpr[];
+}
+
+export interface AddChainExpr {
+	kind: 'AddChainExpr';
+	tokens: Token[];
+	exprs: MultExpr[];
+}
+
+export interface InExpr {
+	kind: 'InExpr';
+	lhs: AddExpr;
+	rhs: AddExpr;
+	is: Token;
+}
+
+export interface RelationChainExpr {
+	kind: 'RelationChainExpr';
+	tokens: Token[];
+	exprs: (InExpr | AddExpr)[];
+}
+
+export interface EqualChainExpr {
+	kind: 'EqualChainExpr';
+	tokens: Token[];
+	exprs: RelationExpr[];
+}
+
+export interface AndChainExpr {
+	kind: 'AndChainExpr';
+	tokens: Token[];
+	exprs: EqualExpr[];
+}
+
+export interface OrChainExpr {
+	kind: 'OrChainExpr';
+	tokens: Token[];
+	exprs: AndExpr[];
+}
+
+export interface IsExpr {
+	kind: 'IsExpr';
+	lhs: OrExpr;
+	rhs: OrExpr;
+	is: Token;
+}
+
 export type ConstantExpr =
 	| BoolExpr
 	| IntExpr
@@ -151,7 +201,9 @@ export function isPrimaryExpr(expr: object): boolean {
 
 export type Expression =
 	| PostfixExpr
-	| BinaryExpr;
+	| BinaryExpr
+	| OrExpr
+	| IsExpr;
 
 export type PostfixExpr1 =
 	| ArrayIndexExpr
@@ -171,3 +223,28 @@ export type UnaryExpr =
 export type BinaryExpr =
 	| BinaryChainExpr
 	| UnaryExpr;
+
+export type MultExpr =
+	| MultChainExpr
+	| BinaryExpr;
+
+export type AddExpr =
+	| AddChainExpr
+	| MultExpr;
+
+export type RelationExpr =
+	| RelationChainExpr
+	| InExpr
+	| AddExpr;
+
+export type EqualExpr =
+	| EqualChainExpr
+	| RelationExpr;
+
+export type AndExpr =
+	| AndChainExpr
+	| EqualExpr;
+
+export type OrExpr =
+	| OrChainExpr
+	| AndExpr;
