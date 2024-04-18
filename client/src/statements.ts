@@ -1,13 +1,13 @@
 import * as parsec from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { AssignExpr, AssignLhsExpr, ConditionExpr, Expression, TupleExpr } from './expressions';
+import { AnnotationExpr, AssignExpr, AssignLhsExpr, ConditionExpr, Expression, IdentifierExpr, NewExpr, ParamExpr, PostfixExpr, StringExpr, TupleExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
 export interface ImportStat {
 	kind: 'ImportStat' | 'ImportAsStat';
-	name: string;
-	source: string;
+	name?: IdentifierExpr;
+	source: IdentifierExpr | StringExpr;
 }
 
 export interface ForeachStat {
@@ -91,6 +91,63 @@ export interface JumpStat {
 	expr?: TupleExpr;
 }
 
+export interface FunctionStat {
+	kind: 'FunctionStat';
+	defTok: Token;
+	asyncTok?: Token;
+	lparen: Token;
+	rparen: Token;
+	name: IdentifierExpr;
+	params: ParamExpr[];
+	isNamed: boolean;
+	stat: Statement;
+	annots: AnnotationExpr[];
+}
+
+export interface MethodStat {
+	kind: 'MethodStat';
+	methodTok: Token;
+	asyncTok?: Token;
+	lparen: Token;
+	rparen: Token;
+	name: IdentifierExpr | NewExpr;
+	params: ParamExpr[];
+	isNamed: boolean;
+	stat: Statement;
+	annots: AnnotationExpr[];
+}
+
+export interface FieldStat {
+	kind: 'FieldStat';
+	fieldTok: Token;
+	fields: IdentifierExpr[];
+}
+
+export interface StaticStat {
+	kind: 'StaticStat';
+	staticTok: Token;
+	name: IdentifierExpr;
+	eq: Token;
+	expr: ConditionExpr;
+}
+
+export type ClassMemberStat =
+	| FieldStat
+	| StaticStat
+	| MethodStat;
+
+export interface ClassStat {
+	kind: 'ClassStat';
+	classTok: Token;
+	name: IdentifierExpr;
+	colon?: Token;
+	super?: PostfixExpr;
+	lbrace?: Token;
+	rbrace?: Token;
+	stats: ClassMemberStat[];
+	annots: AnnotationExpr[];
+}
+
 export type Statement =
 	| IterStat
 	| ImportStat
@@ -100,6 +157,8 @@ export type Statement =
 	| RaiseStat
 	| TryStat
 	| JumpStat
+	| FunctionStat
+	| ClassStat
 	| Expression;
 
 export interface Module {

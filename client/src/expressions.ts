@@ -1,11 +1,12 @@
 import * as parsec from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
+import { CompoundStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
 
 export interface IdentifierExpr {
 	kind: 'IdentifierExpr';
-	value: string;
+	value: Token;
 }
 
 export interface BoolExpr {
@@ -206,6 +207,31 @@ export interface AssignBaseExpr {
 	eq: Token;
 }
 
+export interface ParamExpr {
+	kind: 'ParamExpr';
+	field?: Token;
+	name: IdentifierExpr;
+	eq?: Token;
+	defaultValue?: ConditionExpr;
+}
+
+export interface AnonExpr {
+	kind: 'AnonExpr';
+	asyncTok?: Token;
+	lparen: Token;
+	rparen: Token;
+	params: ParamExpr[];
+	isNamed: boolean;
+	arrow?: Token;
+	expr: AssignExpr | CompoundStat;
+}
+
+export interface AnnotationExpr {
+	kind: 'AnnotationExpr';
+	at: Token;
+	expr: PostfixExpr;
+}
+
 export type ConstantExpr =
 	| BoolExpr
 	| IntExpr
@@ -218,7 +244,8 @@ export type PrimaryExpr =
 	| StringExpr
 	| ArrayExpr
 	| MapExpr
-	| ParensExpr;
+	| ParensExpr
+	| AnonExpr;
 
 const primaryExprs = new Set([
 	'IdentifierExpr',
@@ -239,10 +266,7 @@ export function isPrimaryExpr(expr: object): boolean {
 	return primaryExprs.has('kind' in expr ? expr.kind as string : '');
 }
 
-export type Expression =
-	| PostfixExpr
-	| BinaryExpr
-	| TupleExpr;
+export type Expression = TupleExpr;
 
 export type PostfixExpr1 =
 	| ArrayIndexExpr

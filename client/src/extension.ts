@@ -19,7 +19,7 @@ import {
 	TransportKind
 } from 'vscode-languageclient/node';
 
-import { zinniaTokenizer } from './tokenizer';
+import { TokenKind, zinniaTokenizer } from './tokenizer';
 import { ASSIGN_LHS, CONSTANT, EXPRESSION, MODULE, POSTFIX, PRIMARY } from './parser';
 import { expectEOF, expectSingleResult } from 'typescript-parsec';
 

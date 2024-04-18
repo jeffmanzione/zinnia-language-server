@@ -1,16 +1,16 @@
 import * as parsec from 'typescript-parsec';
 import { Parser, rep_sc, rule } from 'typescript-parsec';
-import { alt_sc, apply, kleft, kmid, kright, list_sc, lrec_sc, opt_sc, seq, tok } from 'typescript-parsec';
+import { alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr } from './expressions';
-import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat } from './statements';
+import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr, AnonExpr, AnnotationExpr } from './expressions';
+import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat, FunctionStat, MethodStat, FieldStat, StaticStat, ClassStat, ClassMemberStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
 
 function applyIdentifier(value: Token): IdentifierExpr {
 	return {
 		kind: 'IdentifierExpr',
-		value: value.text
+		value: value
 	};
 }
 
@@ -609,20 +609,269 @@ function applyJump(
 	};
 }
 
-function applyImportStat(value: Token): ImportStat {
+function applyParam(
+	expr: [Token, IdentifierExpr, [Token, ConditionExpr]]
+): ParamExpr {
+	const [field, name, defaultValExpr] = expr;
+	if (defaultValExpr !== undefined) {
+		const [eq, defaultVal] = defaultValExpr;
+		return {
+			kind: 'ParamExpr',
+			field: field,
+			name: name,
+			eq: eq,
+			defaultValue: defaultVal
+		};
+	}
 	return {
-		kind: 'ImportStat',
-		name: value.text,
-		source: value.text
+		kind: 'ParamExpr',
+		name: name
 	};
 }
 
-function applyImportAsStat(value: [Token, Token]): ImportStat {
-	const [name, source] = value;
+function applyAnnotation(expr: [Token, PostfixExpr]): AnnotationExpr {
+	const [at, pfExpr] = expr;
+	return {
+		kind: 'AnnotationExpr',
+		at: at,
+		expr: pfExpr
+	};
+}
+
+function applyFunction(
+	expr: [
+		AnnotationExpr[], Token, IdentifierExpr, Token,
+		[Token, ParamExpr[], Token] | ParamExpr[],
+		Token, Token, Statement]
+): FunctionStat {
+	const [annots, defTok, name, lparen, paramsExpr, rparen, asyncTok, stat] = expr;
+	if (paramsExpr === undefined) {
+		return {
+			kind: 'FunctionStat',
+			defTok: defTok,
+			name: name,
+			lparen: lparen,
+			rparen: rparen,
+			params: [],
+			isNamed: true,
+			asyncTok: asyncTok,
+			stat: stat,
+			annots: annots === undefined ? [] : annots
+		};
+	}
+	if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
+		const [_, params, __] = paramsExpr;
+		return {
+			kind: 'FunctionStat',
+			defTok: defTok,
+			name: name,
+			lparen: lparen,
+			rparen: rparen,
+			params: params,
+			isNamed: true,
+			asyncTok: asyncTok,
+			stat: stat,
+			annots: annots === undefined ? [] : annots
+		};
+	}
+	return {
+		kind: 'FunctionStat',
+		defTok: defTok,
+		name: name,
+		lparen: lparen,
+		rparen: rparen,
+		params: paramsExpr as ParamExpr[],
+		isNamed: false,
+		asyncTok: asyncTok,
+		stat: stat,
+		annots: annots === undefined ? [] : annots
+	};
+}
+
+function applyMethod(
+	expr: [
+		AnnotationExpr[],
+		[Token, IdentifierExpr] | NewExpr, Token,
+		[Token, ParamExpr[], Token] | ParamExpr[],
+		Token, Token, Statement]
+): MethodStat {
+	const [annots, defExpr, lparen, paramsExpr, rparen, asyncTok, stat] = expr;
+	let methodTok, name;
+	if ('kind' in defExpr && defExpr.kind === 'NewExpr') {
+		methodTok = undefined;
+		name = defExpr;
+	} else {
+		methodTok = defExpr[0];
+		name = defExpr[1];
+	}
+	if (paramsExpr === undefined) {
+		return {
+			kind: 'MethodStat',
+			methodTok: methodTok,
+			name: name,
+			lparen: lparen,
+			rparen: rparen,
+			params: [],
+			isNamed: true,
+			asyncTok: asyncTok,
+			stat: stat,
+			annots: annots === undefined ? [] : annots
+		};
+	} else if (paramsExpr.length == 3 && (paramsExpr[1] instanceof Array || paramsExpr[1] === undefined)) {
+		const [_, params, __] = paramsExpr;
+		return {
+			kind: 'MethodStat',
+			methodTok: methodTok,
+			name: name,
+			lparen: lparen,
+			rparen: rparen,
+			params: params as ParamExpr[],
+			isNamed: true,
+			asyncTok: asyncTok,
+			stat: stat,
+			annots: annots === undefined ? [] : annots
+		};
+	}
+	return {
+		kind: 'MethodStat',
+		methodTok: methodTok,
+		name: name,
+		lparen: lparen,
+		rparen: rparen,
+		params: paramsExpr as ParamExpr[],
+		isNamed: false,
+		asyncTok: asyncTok,
+		stat: stat,
+		annots: annots === undefined ? [] : annots
+	};
+}
+
+function applyAnon(
+	expr: [
+		Token, [Token, ParamExpr[], Token] | ParamExpr[],
+		Token, Token, [Token, AssignExpr] | CompoundStat]
+): AnonExpr {
+	const [lparen, paramsExpr, rparen, asyncTok, body] = expr;
+
+	let rhs: AssignExpr | CompoundStat;
+	let arrow: Token;
+	if ('kind' in body && body.kind === 'CompoundStat') {
+		rhs = body;
+		arrow = undefined;
+	} else {
+		rhs = body[1];
+		arrow = body[0];
+	}
+	if (paramsExpr === undefined) {
+		return {
+			kind: 'AnonExpr',
+			lparen: lparen,
+			rparen: rparen,
+			params: [],
+			isNamed: true,
+			asyncTok: asyncTok,
+			arrow: arrow,
+			expr: rhs
+		};
+	} else if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
+		const [_, params, __] = paramsExpr;
+		return {
+			kind: 'AnonExpr',
+			lparen: lparen,
+			rparen: rparen,
+			params: params,
+			isNamed: true,
+			asyncTok: asyncTok,
+			arrow: arrow,
+			expr: rhs
+		};
+	}
+	return {
+		kind: 'AnonExpr',
+		lparen: lparen,
+		rparen: rparen,
+		params: paramsExpr as ParamExpr[],
+		isNamed: false,
+		asyncTok: asyncTok,
+		arrow: arrow,
+		expr: rhs
+	};
+}
+
+function applyField(expr: [Token, IdentifierExpr[]]): FieldStat {
+	const [fieldTok, fields] = expr;
+	return {
+		kind: 'FieldStat',
+		fieldTok: fieldTok,
+		fields: fields
+	};
+}
+
+function applyStatic(
+	expr: [Token, IdentifierExpr, Token, ConditionExpr]
+): StaticStat {
+	const [staticTok, name, eq, condExpr] = expr;
+	return {
+		kind: 'StaticStat',
+		staticTok: staticTok,
+		name: name,
+		eq: eq,
+		expr: condExpr
+	};
+}
+
+function applyClass(expr: [
+	AnnotationExpr[], Token, IdentifierExpr,
+	[Token, PostfixExpr],
+	[Token, ClassMemberStat[], Token] | ClassMemberStat
+]): ClassStat {
+	const [annots, classTok, name, superExpr, body] = expr;
+	let colon, superClass;
+	if (superExpr === undefined) {
+		colon = undefined;
+		superClass = undefined;
+	} else {
+		colon = superExpr[0];
+		superClass = superExpr[1];
+	}
+	if ('kind' in body) {
+		return {
+			kind: 'ClassStat',
+			classTok: classTok,
+			name: name,
+			colon: colon,
+			super: superClass,
+			stats: [body],
+			annots: annots === undefined ? [] : annots
+		};
+	}
+	const [lbrace, stats, rbrace] = body;
+	return {
+		kind: 'ClassStat',
+		classTok: classTok,
+		name: name,
+		colon: colon,
+		super: superClass,
+		lbrace: lbrace,
+		rbrace: rbrace,
+		stats: stats,
+		annots: annots === undefined ? [] : annots
+	};
+}
+
+function applyImportStat(value: IdentifierExpr | StringExpr): ImportStat {
+	return {
+		kind: 'ImportStat',
+		source: value
+	};
+}
+
+function applyImportAsStat(value: [IdentifierExpr | StringExpr, IdentifierExpr]): ImportStat {
+	const [source, name] = value;
 	return {
 		kind: 'ImportAsStat',
-		name: name.text,
-		source: source.text
+		name: name,
+		source: source
 	};
 }
 
@@ -698,6 +947,16 @@ export const EXIT = rule<TokenKind, ExitStat>();
 export const RAISE = rule<TokenKind, RaiseStat>();
 export const TRY = rule<TokenKind, TryStat>();
 export const JUMP = rule<TokenKind, JumpStat>();
+
+export const FUNCTION = rule<TokenKind, FunctionStat>();
+export const PARAM = rule<TokenKind, ParamExpr>();
+export const ANON = rule<TokenKind, AnonExpr>();
+export const ANNOTATION = rule<TokenKind, AnnotationExpr>();
+
+export const CLASS = rule<TokenKind, ClassStat>();
+export const METHOD = rule<TokenKind, MethodStat>();
+export const FIELD = rule<TokenKind, FieldStat>();
+export const STATIC = rule<TokenKind, StaticStat>();
 
 export const IMPORT = rule<TokenKind, ImportStat>();
 
@@ -808,7 +1067,7 @@ PARENS.setPattern(
 
 PRIMARY.setPattern(
 	alt_sc(
-		// ANON_FUNCTION_DEFINITION,
+		ANON,
 		IDENTIFIER,
 		NEW,
 		CONSTANT,
@@ -821,7 +1080,7 @@ PRIMARY.setPattern(
 
 PRIMARY_NO_CONSTANTS.setPattern(
 	alt_sc(
-		// ANON_FUNCTION_DEFINITION,
+		ANON,
 		IDENTIFIER,
 		STRING,
 		ARRAY,
@@ -903,17 +1162,19 @@ POSTFIX.setPattern(
 		alt_sc(
 			seq(
 				PRIMARY_NO_CONSTANTS,
-				rep_sc(
-					kmid(
-						opt_sc(tok(TokenKind.NEWLINE)),
+				kleft(
+					rep_sc(
 						alt_sc(
 							ARRAY_INDEX,
 							EMPTY_PARENS,
 							FUNCTION_CALL,
-							MEMBER_ACCESS,
-						),
-						opt_sc(tok(TokenKind.NEWLINE))
-					)
+							kright(
+								opt_sc(tok(TokenKind.NEWLINE)),
+								MEMBER_ACCESS
+							)
+						)
+					),
+					opt_sc(tok(TokenKind.NEWLINE))
 				)
 			),
 			PRIMARY
@@ -951,7 +1212,6 @@ UNARY.setPattern(
 					tok(TokenKind.SYMBOL_TILDE),
 					tok(TokenKind.SYMBOL_EXCLAIM),
 					tok(TokenKind.SYMBOL_MINUS),
-					tok(TokenKind.KEYWORD_CONST),
 					tok(TokenKind.KEYWORD_AWAIT),
 				)
 			),
@@ -1227,9 +1487,8 @@ TUPLE.setPattern(
 );
 
 EXPRESSION.setPattern(
-	kmid(
-		opt_sc(tok(TokenKind.NEWLINE)),
-		ASSIGN,
+	kleft(
+		TUPLE,
 		opt_sc(tok(TokenKind.NEWLINE))
 	)
 );
@@ -1317,14 +1576,16 @@ ITER.setPattern(
 COMPOUND.setPattern(
 	apply(
 		seq(
-			kleft(
-				tok(TokenKind.SYMBOL_LBRACE),
+			kmid(
 				opt_sc(tok(TokenKind.NEWLINE)),
+				tok(TokenKind.SYMBOL_LBRACE),
+				opt_sc(tok(TokenKind.NEWLINE))
 			),
 			rep_sc(STATEMENT),
-			kright(
+			kmid(
 				opt_sc(tok(TokenKind.NEWLINE)),
-				tok(TokenKind.SYMBOL_RBRACE)
+				tok(TokenKind.SYMBOL_RBRACE),
+				opt_sc(tok(TokenKind.NEWLINE))
 			)
 		),
 		applyCompound
@@ -1414,12 +1675,204 @@ JUMP.setPattern(
 	)
 );
 
+PARAM.setPattern(
+	apply(
+		kmid(
+			opt_sc(tok(TokenKind.NEWLINE)),
+			seq(
+				opt_sc(tok(TokenKind.KEYWORD_FIELD)),
+				IDENTIFIER,
+				opt_sc(
+					seq(
+						tok(TokenKind.SYMBOL_EQUALS),
+						CONDITION
+					)
+				)
+			),
+			opt_sc(tok(TokenKind.NEWLINE))
+		),
+		applyParam
+	)
+);
+
+ANNOTATION.setPattern(
+	apply(
+		kmid(
+			opt_sc(tok(TokenKind.NEWLINE)),
+			seq(
+				tok(TokenKind.SYMBOL_AT),
+				POSTFIX
+			),
+			opt_sc(tok(TokenKind.NEWLINE))
+		),
+		applyAnnotation
+	)
+);
+
+FUNCTION.setPattern(
+	apply(
+		seq(
+			opt_sc(rep_sc(ANNOTATION)),
+			alt_sc(
+				tok(TokenKind.KEYWORD_DEF),
+				tok(TokenKind.KEYWORD_FUNCTION)
+			),
+			IDENTIFIER,
+			tok(TokenKind.SYMBOL_LPAREN),
+			alt_sc(
+				seq(
+					tok(TokenKind.SYMBOL_LBRACE),
+					list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+					tok(TokenKind.SYMBOL_RBRACE)
+				),
+				list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA))
+			),
+			tok(TokenKind.SYMBOL_RPAREN),
+			opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
+			STATEMENT
+		),
+		applyFunction
+	)
+);
+
+METHOD.setPattern(
+	apply(
+		seq(
+			opt_sc(rep_sc(ANNOTATION)),
+			alt_sc(
+				seq(
+					tok(TokenKind.KEYWORD_METHOD),
+					IDENTIFIER
+				),
+				NEW
+			),
+			tok(TokenKind.SYMBOL_LPAREN),
+			alt_sc(
+				seq(
+					tok(TokenKind.SYMBOL_LBRACE),
+					list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+					tok(TokenKind.SYMBOL_RBRACE)
+				),
+				list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+				nil()
+			),
+			tok(TokenKind.SYMBOL_RPAREN),
+			opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
+			STATEMENT
+		),
+		applyMethod
+	)
+);
+
+ANON.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.SYMBOL_LPAREN),
+			alt_sc(
+				seq(
+					tok(TokenKind.SYMBOL_LBRACE),
+					list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+					tok(TokenKind.SYMBOL_RBRACE)
+				),
+				list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+				nil()
+			),
+			tok(TokenKind.SYMBOL_RPAREN),
+			opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
+			alt_sc(
+				seq(
+					tok(TokenKind.SYMBOL_RARROW),
+					ASSIGN
+				),
+				COMPOUND
+			)
+		),
+		applyAnon
+	)
+);
+
+FIELD.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.KEYWORD_FIELD),
+			list_sc(IDENTIFIER, tok(TokenKind.SYMBOL_COMMA))
+		),
+		applyField
+	)
+);
+
+STATIC.setPattern(
+	apply(
+		seq(
+			tok(TokenKind.KEYWORD_STATIC),
+			IDENTIFIER,
+			tok(TokenKind.SYMBOL_EQUALS),
+			CONDITION
+		),
+		applyStatic
+	)
+);
+
+CLASS.setPattern(
+	apply(
+		seq(
+			opt_sc(rep_sc(ANNOTATION)),
+			tok(TokenKind.KEYWORD_CLASS),
+			IDENTIFIER,
+			opt_sc(
+				seq(
+					tok(TokenKind.SYMBOL_COLON),
+					POSTFIX
+				)
+			),
+			alt_sc(
+				seq(
+					kmid(
+						opt_sc(tok(TokenKind.NEWLINE)),
+						tok(TokenKind.SYMBOL_LBRACE),
+						opt_sc(tok(TokenKind.NEWLINE))
+					),
+					rep_sc(
+						kmid(
+							opt_sc(tok(TokenKind.NEWLINE)),
+							alt_sc(
+								METHOD,
+								FIELD,
+								STATIC
+							),
+							opt_sc(tok(TokenKind.NEWLINE))
+						)
+					),
+					kmid(
+						opt_sc(tok(TokenKind.NEWLINE)),
+						tok(TokenKind.SYMBOL_RBRACE),
+						opt_sc(tok(TokenKind.NEWLINE))
+					),
+				),
+				kmid(
+					opt_sc(tok(TokenKind.NEWLINE)),
+					alt_sc(
+						METHOD,
+						FIELD,
+						STATIC
+					),
+					opt_sc(tok(TokenKind.NEWLINE))
+				)
+			)
+		),
+		applyClass
+	)
+);
+
 IMPORT.setPattern(
 	alt_sc(
 		apply(
 			kright(
 				tok(TokenKind.KEYWORD_IMPORT),
-				tok(TokenKind.IDENTIFIER)
+				alt_sc(
+					IDENTIFIER,
+					STRING
+				)
 			),
 			applyImportStat
 		),
@@ -1427,11 +1880,11 @@ IMPORT.setPattern(
 			seq(
 				kright(
 					tok(TokenKind.KEYWORD_IMPORT),
-					tok(TokenKind.LITERAL_STRING)
+					STRING
 				),
 				kright(
 					tok(TokenKind.KEYWORD_AS),
-					tok(TokenKind.IDENTIFIER)
+					IDENTIFIER
 				)
 			),
 			applyImportAsStat
@@ -1443,12 +1896,13 @@ STATEMENT.setPattern(
 	kmid(
 		opt_sc(tok(TokenKind.NEWLINE)),
 		alt_sc(
+			EXIT,
+			RAISE,
+			TRY,
+			SELECT,
 			COMPOUND,
 			ITER,
-			SELECT,
-			TRY,
 			JUMP,
-			IMPORT,
 			EXPRESSION
 		),
 		opt_sc(tok(TokenKind.NEWLINE))
@@ -1457,7 +1911,24 @@ STATEMENT.setPattern(
 
 MODULE.setPattern(
 	apply(
-		rep_sc(STATEMENT),
+		rep_sc(
+			kmid(
+				opt_sc(tok(TokenKind.NEWLINE)),
+				alt_sc(
+					IMPORT,
+					CLASS,
+					FUNCTION,
+					EXIT,
+					RAISE,
+					TRY,
+					SELECT,
+					COMPOUND,
+					ITER,
+					EXPRESSION
+				),
+				opt_sc(tok(TokenKind.NEWLINE))
+			)
+		),
 		applyModule
 	)
 );

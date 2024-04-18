@@ -93,9 +93,11 @@ export enum TokenKind {
 }
 
 export const zinniaTokenizer = buildLexer([
-	[true, /^'([^']|\\.)*'/g, TokenKind.LITERAL_STRING],
+	[true, /^'(\\'|[^'])*'/g, TokenKind.LITERAL_STRING],
 	[true, /^-?\d+/g, TokenKind.LITEARL_INTEGER],
 	[true, /^-?\d+(\.\d+)?/g, TokenKind.LITEARL_FLOAT],
+
+	[true, /^(\r?\n)+/g, TokenKind.NEWLINE],
 
 	[true, /^abstract/g, TokenKind.KEYWORD_ABSTRACT],
 	[true, /^and/g, TokenKind.KEYWORD_AND],
@@ -179,9 +181,7 @@ export const zinniaTokenizer = buildLexer([
 
 
 	[true, /^[a-zA-Z_][a-zA-Z0-9_]*/g, TokenKind.IDENTIFIER],
-	[true, /^(\r?\n)+/g, TokenKind.NEWLINE],
-
 	[false, /^;[^\n]*\n/g, TokenKind.COMMENT_LINE],
 	[false, /^[/]\*([^*]|\*+[^/])*\*+[/]/g, TokenKind.COMMENT_BLOCK],
-	[false, /^\s+/g, TokenKind.SPACE]
+	[false, /^(?:(?!\n)\s)+/g, TokenKind.SPACE]
 ]);
