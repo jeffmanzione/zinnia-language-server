@@ -6,27 +6,31 @@ type Token = parsec.Token<TokenKind>;
 
 export interface IdentifierExpr {
 	kind: 'IdentifierExpr';
-	value: Token;
+	token: Token;
 }
 
 export interface BoolExpr {
 	kind: 'BoolExpr';
+	token: Token;
 	value: boolean;
 }
 
 export interface IntExpr {
 	kind: 'IntExpr';
+	token: Token;
 	value: number;
 }
 
 export interface FloatExpr {
 	kind: 'FloatExpr';
+	token: Token;
 	value: number;
 
 }
 
 export interface StringExpr {
 	kind: 'StringExpr';
+	token: Token;
 	text: string;
 }
 

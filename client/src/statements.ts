@@ -6,6 +6,8 @@ type Token = parsec.Token<TokenKind>;
 
 export interface ImportStat {
 	kind: 'ImportStat' | 'ImportAsStat';
+	importTok: Token;
+	asTok?: Token;
 	name?: IdentifierExpr;
 	source: IdentifierExpr | StringExpr;
 }

@@ -1,5 +1,5 @@
 import * as parsec from 'typescript-parsec';
-import { Parser, rep_sc, rule } from 'typescript-parsec';
+import { rep_sc, rule } from 'typescript-parsec';
 import { alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
 import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr, AnonExpr, AnnotationExpr } from './expressions';
@@ -10,13 +10,14 @@ type Token = parsec.Token<TokenKind>;
 function applyIdentifier(value: Token): IdentifierExpr {
 	return {
 		kind: 'IdentifierExpr',
-		value: value
+		token: value
 	};
 }
 
 function applyBool(value: Token): BoolExpr {
 	return {
 		kind: 'BoolExpr',
+		token: value,
 		value: (/True/i).test(value.text)
 	};
 }
@@ -24,6 +25,7 @@ function applyBool(value: Token): BoolExpr {
 function applyInt(value: Token): IntExpr {
 	return {
 		kind: 'IntExpr',
+		token: value,
 		value: Number(value.text)
 	};
 }
@@ -31,6 +33,7 @@ function applyInt(value: Token): IntExpr {
 function applyFloat(value: Token): FloatExpr {
 	return {
 		kind: 'FloatExpr',
+		token: value,
 		value: Number(value.text)
 	};
 }
@@ -38,6 +41,7 @@ function applyFloat(value: Token): FloatExpr {
 function applyString(value: Token): StringExpr {
 	return {
 		kind: 'StringExpr',
+		token: value,
 		text: value.text
 	};
 }
@@ -859,19 +863,23 @@ function applyClass(expr: [
 	};
 }
 
-function applyImportStat(value: IdentifierExpr | StringExpr): ImportStat {
+function applyImportStat(expr: [Token, IdentifierExpr | StringExpr]): ImportStat {
+	const [importTok, name] = expr;
 	return {
 		kind: 'ImportStat',
-		source: value
+		source: name,
+		importTok: importTok
 	};
 }
 
-function applyImportAsStat(value: [IdentifierExpr | StringExpr, IdentifierExpr]): ImportStat {
-	const [source, name] = value;
+function applyImportAsStat(value: [Token, IdentifierExpr | StringExpr, Token, IdentifierExpr]): ImportStat {
+	const [importTok, source, asTok, name] = value;
 	return {
 		kind: 'ImportAsStat',
 		name: name,
-		source: source
+		source: source,
+		importTok: importTok,
+		asTok: asTok
 	};
 }
 
@@ -1867,7 +1875,7 @@ CLASS.setPattern(
 IMPORT.setPattern(
 	alt_sc(
 		apply(
-			kright(
+			seq(
 				tok(TokenKind.KEYWORD_IMPORT),
 				alt_sc(
 					IDENTIFIER,
@@ -1878,14 +1886,10 @@ IMPORT.setPattern(
 		),
 		apply(
 			seq(
-				kright(
-					tok(TokenKind.KEYWORD_IMPORT),
-					STRING
-				),
-				kright(
-					tok(TokenKind.KEYWORD_AS),
-					IDENTIFIER
-				)
+				tok(TokenKind.KEYWORD_IMPORT),
+				STRING,
+				tok(TokenKind.KEYWORD_AS),
+				IDENTIFIER
 			),
 			applyImportAsStat
 		)
