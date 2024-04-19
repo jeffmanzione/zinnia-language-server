@@ -629,7 +629,8 @@ function applyParam(
 	}
 	return {
 		kind: 'ParamExpr',
-		name: name
+		name: name,
+		field: field
 	};
 }
 

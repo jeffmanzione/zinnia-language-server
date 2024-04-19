@@ -75,7 +75,7 @@
 			]
 		},
 		"control": {
-			"match": "((?<![\\(\\.)]{1})(import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?![_A-Za-z0-9]{1}))",
+			"match": "((?<![\\(\\.)_A-Za-z0-9]{1})(import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?![_A-Za-z0-9]+))",
 			"name": "keyword.control"
 		},
 		"keyword": {
@@ -85,22 +85,6 @@
 		"operator": {
 			"match": "(\\||\\&|\\.|\\*|\\!|\\~|\\/|\\<|\\>|\\=|\\,|\\:)",
 			"name": "keyword.operator"
-		},
-		"var": {
-			"match": "_*[a-z]{1}[A-Za-z0-9]*",
-			"name": "variable.other.readwrite"
-		},
-		"class": {
-			"match": "_*[A-Z][A-Za-z]*",
-			"name": "variable.other.constant"
-		},
-		"function": {
-			"match": "[_A-Za-z0-9]+(?=\\()",
-			"name": "entity.name.function"
-		},
-		"annotation": {
-			"match": "\\@[_A-Za-z0-9]+",
-			"name": "entity.other.attribute-name"
 		},
 		"paren-expression": {
 			"begin": "\\(",

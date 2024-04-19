@@ -19,9 +19,10 @@ import {
 	TransportKind
 } from 'vscode-languageclient/node';
 
-import { TokenKind, zinniaTokenizer } from './tokenizer';
-import { ASSIGN_LHS, CONSTANT, EXPRESSION, MODULE, POSTFIX, PRIMARY } from './parser';
+import { zinniaTokenizer } from './tokenizer';
+import { MODULE, } from './parser';
 import { expectEOF, expectSingleResult } from 'typescript-parsec';
+import { SemanticToken, generateSemanticTokens } from './semantic';
 
 let client: LanguageClient;
 
@@ -37,7 +38,7 @@ const legend = (function () {
 	tokenTypesLegend.forEach((tokenType, index) => tokenTypes.set(tokenType, index));
 
 	const tokenModifiersLegend = [
-		'declaration', 'documentation', 'readonly', 'static', 'abstract', 'deprecated',
+		'declaration', 'defaultLibrary', 'documentation', 'readonly', 'static', 'abstract', 'deprecated',
 		'modification', 'async'
 	];
 	tokenModifiersLegend.forEach((tokenModifier, index) => tokenModifiers.set(tokenModifier, index));
@@ -98,21 +99,13 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
-interface IParsedToken {
-	line: number;
-	startCharacter: number;
-	length: number;
-	tokenType: string;
-	tokenModifiers: string[];
-}
-
 
 class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProvider {
 	async provideDocumentSemanticTokens(document: TextDocument, token: CancellationToken): Promise<SemanticTokens> {
 		const allTokens = this._parseText(document.getText());
 		const builder = new SemanticTokensBuilder();
 		allTokens.forEach((token) => {
-			builder.push(token.line, token.startCharacter, token.length, this._encodeTokenType(token.tokenType), this._encodeTokenModifiers(token.tokenModifiers));
+			builder.push(token.row, token.col, token.text.length, this._encodeTokenType(token.type), this._encodeTokenModifiers(token.modifiers));
 		});
 		return builder.build();
 	}
@@ -139,75 +132,11 @@ class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProv
 		return result;
 	}
 
-	private _parseText(text: string): IParsedToken[] {
+	private _parseText(text: string): SemanticToken[] {
 		const token = zinniaTokenizer.parse(text);
 		const parserOutput = MODULE.parse(token);
 		const output = expectSingleResult(expectEOF(parserOutput));
 		console.log(output);
-
-
-		// const classes: string[] = [];
-		// const functions: string[] = [];
-		// const methods: string[] = [];
-		// const imports: string[] = [];
-
-		// for (let i = 0; i < rawTokens.length; i++) {
-		// 	const prevToken = (i == 0) ? null : rawTokens[i - 1];
-		// 	const token = rawTokens[i];
-		// 	const nextToken = (i == rawTokens.length - 1) ? null : rawTokens[i + 1];
-		// 	if (prevToken?.text == 'import') {
-		// 		imports.push(token.text);
-		// 	} else if (prevToken?.text == 'class' ||
-		// 		(prevToken?.text == '.' && this._isCapitalized(token.text))) {
-		// 		classes.push(token.text);
-		// 	} else if (prevToken?.text == 'def' ||
-		// 		(prevToken?.text != '.' && nextToken?.text == '(')) {
-		// 		functions.push(token.text);
-		// 	} else if (token.text == 'new' ||
-		// 		prevToken?.text == 'method' ||
-		// 		(prevToken?.text == '.' && nextToken?.text == '(')) {
-		// 		console.log(token);
-		// 		methods.push(token.text);
-		// 		// } else if (prevToken?.text == 'field') {
-		// 		// 	token.type = 'property';
-		// 	} else if (nextToken?.text == ':') {
-		// 		token.type = 'parameter';
-		// 	}
-		// }
-
-		// const tokens: IParsedToken[] = [];
-		// for (const token of rawTokens) {
-		// 	let tokenType;
-		// 	const tokenModifiers: string[] = [];
-		// 	if (classes.indexOf(token.text) >= 0) {
-		// 		tokenType = 'class';
-		// 	} else if (functions.indexOf(token.text) >= 0) {
-		// 		tokenType = 'function';
-		// 	} else if (methods.indexOf(token.text) >= 0) {
-		// 		tokenType = 'method';
-		// 	} else if (imports.indexOf(token.text) >= 0) {
-		// 		tokenType = 'namespace';
-		// 	} else {
-		// 		tokenType = token.type;
-		// 	}
-
-		// 	if (token.text == 'HELLO') {
-		// 		tokenModifiers.push('static');
-		// 	}
-
-		// 	tokens.push({
-		// 		line: token.line - 1,
-		// 		startCharacter: token.column - 1,
-		// 		length: token.text.length,
-		// 		tokenType: tokenType,
-		// 		tokenModifiers: tokenModifiers
-		// 	});
-		// }
-		// return tokens;
-		return [];
-	}
-
-	private _isCapitalized(word: string): boolean {
-		return word[0] == word[0].toUpperCase();
+		return generateSemanticTokens(output);
 	}
 }
