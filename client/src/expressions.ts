@@ -9,6 +9,11 @@ export interface IdentifierExpr {
 	token: Token;
 }
 
+export interface NoneExpr {
+	kind: 'NoneExpr';
+	token: Token;
+}
+
 export interface BoolExpr {
 	kind: 'BoolExpr';
 	token: Token;
@@ -237,6 +242,7 @@ export interface AnnotationExpr {
 }
 
 export type ConstantExpr =
+	| NoneExpr
 	| BoolExpr
 	| IntExpr
 	| FloatExpr;
@@ -251,12 +257,23 @@ export type PrimaryExpr =
 	| ParensExpr
 	| AnonExpr;
 
-const primaryExprs = new Set([
-	'IdentifierExpr',
-	'NewExpr',
+const constantExprs = new Set([
+	'NoneExpr',
 	'IntExpr',
 	'FloatExpr',
 	'BoolExpr',
+]);
+
+export function isConstantExpr(expr: object): boolean {
+	if (!('kind' in expr)) {
+		return false;
+	}
+	return constantExprs.has('kind' in expr ? expr.kind as string : '');
+}
+
+const primaryExprs = new Set([
+	'IdentifierExpr',
+	'NewExpr',
 	'StringExpr',
 	'ArrayExpr',
 	'MapExpr',
@@ -264,10 +281,14 @@ const primaryExprs = new Set([
 ]);
 
 export function isPrimaryExpr(expr: object): boolean {
+	if (isConstantExpr(expr)) {
+		return true;
+	}
 	if (!('kind' in expr)) {
 		return false;
 	}
-	return primaryExprs.has('kind' in expr ? expr.kind as string : '');
+	const str = 'kind' in expr ? expr.kind as string : '';
+	return primaryExprs.has(str);
 }
 
 export type Expression = TupleExpr;

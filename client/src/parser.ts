@@ -2,7 +2,7 @@ import * as parsec from 'typescript-parsec';
 import { rep_sc, rule } from 'typescript-parsec';
 import { alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
-import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr, AnonExpr, AnnotationExpr } from './expressions';
+import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr, AnonExpr, AnnotationExpr, NoneExpr } from './expressions';
 import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat, FunctionStat, MethodStat, FieldStat, StaticStat, ClassStat, ClassMemberStat } from './statements';
 
 type Token = parsec.Token<TokenKind>;
@@ -10,6 +10,13 @@ type Token = parsec.Token<TokenKind>;
 function applyIdentifier(value: Token): IdentifierExpr {
 	return {
 		kind: 'IdentifierExpr',
+		token: value
+	};
+}
+
+function applyNone(value: Token): NoneExpr {
+	return {
+		kind: 'NoneExpr',
 		token: value
 	};
 }
@@ -1000,6 +1007,10 @@ CONSTANT.setPattern(
 				tok(TokenKind.KEYWORD_FALSE),
 			),
 			applyBool
+		),
+		apply(
+			tok(TokenKind.KEYWORD_NULL),
+			applyNone,
 		),
 		apply(
 			tok(TokenKind.LITEARL_INTEGER),

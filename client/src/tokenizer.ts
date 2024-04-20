@@ -130,7 +130,7 @@ export const zinniaTokenizer = buildLexer([
 	[true, /^module/g, TokenKind.KEYWORD_MODULE],
 	[true, /^new/g, TokenKind.KEYWORD_NEW],
 	[true, /^notin/g, TokenKind.KEYWORD_NOTIN],
-	[true, /^null/g, TokenKind.KEYWORD_NULL],
+	[true, /^None/g, TokenKind.KEYWORD_NULL],
 	[true, /^or/g, TokenKind.KEYWORD_OR],
 	[true, /^package/g, TokenKind.KEYWORD_PACKAGE],
 	[true, /^private/g, TokenKind.KEYWORD_PRIVATE],

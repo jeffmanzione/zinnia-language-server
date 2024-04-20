@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
-import { ClassStat, CompoundStat, FieldStat, ImportStat, MethodStat, Module, SelectStat, Statement, StaticStat } from './statements';
+import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, ImportStat, MethodStat, Module, SelectStat, Statement, StaticStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { ParamExpr } from './expressions';
+import { AssignLhsExpr, ConstantExpr, Expression, IdentifierExpr, ParamExpr, UnaryChainExpr, UnaryExpr, isConstantExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -12,6 +12,45 @@ export interface SemanticToken {
 	row: number;
 	type: string;
 	modifiers: string[];
+}
+
+type IdType =
+	| 'variable'
+	| 'property'
+	| 'parameter'
+	| 'class';
+
+class SemanticIdentifier {
+	ast: IdentifierExpr;
+	id: string;
+	type: IdType;
+
+	constructor(ast: IdentifierExpr, type: IdType) {
+		this.ast = ast;
+		this.id = ast.token.text;
+		this.type = type;
+	}
+}
+
+interface SemanticConstant {
+	ast: ConstantExpr;
+	text: string;
+	value: boolean | number | null;
+}
+
+interface SemanticUnary {
+	ast: UnaryChainExpr;
+	rhs: SemanticExpression;
+}
+
+type SemanticExpression =
+	| SemanticConstant
+	| SemanticIdentifier
+	| SemanticUnary;
+
+interface SemanticAssignLhs {
+	ast: AssignLhsExpr;
+	expr: SemanticIdentifier | SemanticAssignLhs[];
 }
 
 interface SemanticImport {
@@ -65,9 +104,37 @@ interface SemanticSelect {
 	ifFalse?: SemanticStatement;
 }
 
+interface SemanticWhile {
+	ast: WhileStat;
+	cond: SemanticExpression; // Condition
+	body: SemanticStatement;
+}
+
+interface SemanticFor {
+	ast: ForStat;
+	first: SemanticExpression; // Assignment
+	second: SemanticExpression; // Condition
+	third: SemanticExpression; // Assignment
+	body: SemanticStatement;
+}
+
+interface SemanticForeach {
+	ast: ForeachStat;
+	lhs: SemanticAssignLhs; // Assignment
+	rhs: SemanticExpression; // Condition
+	body: SemanticStatement;
+}
+
+type SemanticIter =
+	| SemanticWhile
+	| SemanticFor
+	| SemanticForeach;
+
 type SemanticStatement =
 	| SemanticCompound
-	| SemanticSelect;
+	| SemanticSelect
+	| SemanticIter
+	| SemanticExpression;
 
 interface SemanticModule {
 	ast: Module;
@@ -76,9 +143,42 @@ interface SemanticModule {
 	statements: SemanticStatement[];
 }
 
+class Block {
+	private parent?: Block;
+	private members: Map<string, SemanticIdentifier> = new Map();
+
+	constructor(parent?: Block) { this.parent = parent; }
+
+	lookupOrCreateIdentifier(id: IdentifierExpr, type: IdType): SemanticIdentifier {
+		const foundId = this.findIdentifier(id.token.text);
+		if (foundId != null) {
+			return foundId;
+		}
+		const sid = new SemanticIdentifier(id, type);
+		this.members.set(sid.id, sid);
+		return sid;
+	}
+
+	findIdentifier(id: string): SemanticIdentifier {
+		if (this.members.has(id)) {
+			return this.members.get(id);
+		}
+		if (this.parent != null) {
+			return this.parent.findIdentifier(id);
+		}
+		return null;
+	}
+}
+
 class SemanticContext {
 	module: SemanticModule;
+	block: Block;
 
+	newBlock(): SemanticContext {
+		const copy = structuredClone(this);
+		copy.block = new Block(this.block);
+		return copy;
+	}
 }
 
 function createToken(token: Token, type: string, modifiers: string[] = []): SemanticToken {
@@ -89,6 +189,41 @@ function createToken(token: Token, type: string, modifiers: string[] = []): Sema
 		type: type,
 		modifiers: modifiers
 	};
+}
+
+function generateTokensForConstant(cnst: SemanticConstant, context: SemanticContext, tokens: SemanticToken[]): void {
+	tokens.push(createToken(cnst.ast.token, 'number', ['constant']));
+}
+
+function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, tokens: SemanticToken[]): void {
+	for (const un of unary.ast.unaries) {
+		if (un.kind === TokenKind.KEYWORD_ASYNC) {
+			tokens.push(createToken(un, 'keyword'));
+		}
+	}
+	generateTokensForExpression(unary.rhs, context, tokens);
+}
+
+function generateTokensForExpression(expr: SemanticExpression, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (expr == null) {
+		return;
+	}
+	if (isConstantExpr(expr.ast)) {
+		generateTokensForConstant(expr as SemanticConstant, context, tokens);
+	} else if (expr.ast.kind === 'UnaryChainExpr') {
+		generateTokensForUnary(expr as SemanticUnary, context, tokens);
+	}
+}
+
+function generateTokensForSemanticAssign(asgn: SemanticAssignLhs, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (asgn.ast.kind === 'IdentifierExpr') {
+		generateTokensForExpression(asgn.expr as SemanticIdentifier, context, tokens);
+
+	} else {
+		for (const expr of asgn.expr as SemanticAssignLhs[]) {
+			generateTokensForSemanticAssign(expr, context, tokens);
+		}
+	}
 }
 
 function generateTokensForImport(imprt: SemanticImport, context: SemanticContext, tokens: SemanticToken[]): void {
@@ -152,6 +287,21 @@ function generateTokensForStatement(stat: SemanticStatement, context: SemanticCo
 			tokens.push(createToken(stat.ast.elseTok, 'keyword'));
 			generateTokensForStatement(selectStat.ifFalse, context, tokens);
 		}
+	} else if (stat.ast.kind === 'ForStat') {
+		tokens.push(createToken(stat.ast.forTok, 'keyword'));
+		generateTokensForExpression((stat as SemanticFor).first, context, tokens);
+		generateTokensForExpression((stat as SemanticFor).second, context, tokens);
+		generateTokensForExpression((stat as SemanticFor).third, context, tokens);
+		generateTokensForStatement((stat as SemanticFor).body, context, tokens);
+	} else if (stat.ast.kind === 'ForeachStat') {
+		tokens.push(createToken(stat.ast.forTok, 'keyword'));
+		generateTokensForSemanticAssign((stat as SemanticForeach).lhs, context, tokens);
+		generateTokensForExpression((stat as SemanticForeach).rhs, context, tokens);
+		generateTokensForStatement((stat as SemanticForeach).body, context, tokens);
+	} else if (stat.ast.kind === 'WhileStat') {
+		tokens.push(createToken(stat.ast.whileTok, 'keyword'));
+		generateTokensForExpression((stat as SemanticWhile).cond, context, tokens);
+		generateTokensForStatement((stat as SemanticWhile).body, context, tokens);
 	}
 }
 
@@ -167,21 +317,92 @@ function generatTokensForModule(module: SemanticModule, context: SemanticContext
 	}
 }
 
+function processUnary(unary: UnaryChainExpr, context: SemanticContext): SemanticUnary {
+	return {
+		ast: unary,
+		rhs: processExpression(unary.expr, context)
+	};
+}
+
+function processIdentifier(id: IdentifierExpr, context: SemanticContext): SemanticIdentifier {
+	return context.block.lookupOrCreateIdentifier(id, 'variable');
+}
+
+function processExpression(expr: Expression, context: SemanticContext): SemanticExpression {
+	if (isConstantExpr(expr)) {
+		return processConstant(expr as ConstantExpr, context);
+	} else if (expr.kind === 'IdentifierExpr') {
+		return processIdentifier(expr as IdentifierExpr, context);
+	} else if (expr.kind === 'UnaryChainExpr') {
+		return processUnary(expr as UnaryChainExpr, context);
+	}
+	return undefined;
+}
+
+function processConstant(expr: ConstantExpr, context: SemanticContext): SemanticExpression {
+	const text = expr.token.text;
+	return {
+		ast: expr,
+		text: text,
+		value: expr.kind === 'NoneExpr' ? null : expr.kind === 'BoolExpr' ? /^True$/.test(text) : +text
+	};
+}
+
+function processAssignLhs(expr: AssignLhsExpr, context: SemanticContext): SemanticAssignLhs {
+	if (expr.kind === 'IdentifierExpr') {
+		return {
+			ast: expr,
+			expr: context.block.lookupOrCreateIdentifier(expr, 'variable')
+		};
+	}
+	return {
+		ast: expr,
+		expr: expr.assigns.map(a => processAssignLhs(a, context))
+	};
+}
+
 function processStatement(stat: Statement, context: SemanticContext): SemanticStatement {
 	if (stat.kind === 'CompoundStat') {
+		const newContext = context.newBlock();
 		return {
 			ast: stat,
-			stats: stat.stats.map(s => processStatement(s, context))
+			stats: stat.stats.map(s => processStatement(s, newContext))
 		};
 	} else if (stat.kind === 'SelectStat') {
 		return {
 			ast: stat,
 			cond: processStatement(stat.cond, context),
-			ifTrue: processStatement(stat.ifTrue, context),
-			ifFalse: stat.elseTok != null ? processStatement(stat.ifFalse, context) : undefined
+			ifTrue: processStatement(stat.ifTrue, context.newBlock()),
+			ifFalse: stat.elseTok != null ? processStatement(stat.ifFalse, context.newBlock()) : undefined
 		};
+	} else if (stat.kind === 'WhileStat') {
+		const newContext = context.newBlock();
+		return {
+			ast: stat,
+			cond: processExpression(stat.cond, newContext),
+			body: processStatement(stat.stat, newContext)
+
+		};
+	} else if (stat.kind === 'ForStat') {
+		const newContext = context.newBlock();
+		return {
+			ast: stat,
+			first: processExpression(stat.first, newContext),
+			second: processExpression(stat.second, newContext),
+			third: processExpression(stat.third, newContext),
+			body: processStatement(stat.stat, newContext)
+		};
+	} else if (stat.kind === 'ForeachStat') {
+		const newContext = context.newBlock();
+		return {
+			ast: stat,
+			lhs: processAssignLhs(stat.lhs, newContext),
+			rhs: processExpression(stat.iter, newContext),
+			body: processStatement(stat.stat, newContext)
+		};
+	} else {
+		return processExpression(stat as Expression, context);
 	}
-	return undefined;
 }
 
 function createImportName(stat: ImportStat): string {

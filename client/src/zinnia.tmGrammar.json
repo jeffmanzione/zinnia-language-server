@@ -61,6 +61,10 @@
 			"match": "(False)",
 			"name": "constant.language.boolean.false"
 		},
+		"none": {
+			"match": "(None)",
+			"name": "constant.language.null"
+		},
 		"constant": {
 			"patterns": [
 				{
@@ -71,16 +75,11 @@
 				},
 				{
 					"include": "#false"
+				},
+				{
+					"include": "#none"
 				}
 			]
-		},
-		"control": {
-			"match": "((?<![\\(\\.)_A-Za-z0-9]{1})(import|module|if|then|else|while|for|break|continue|return|is|try|catch|raise|in|notin|and|or|as(?!ync)|await)(?![_A-Za-z0-9]+))",
-			"name": "keyword.control"
-		},
-		"keyword": {
-			"match": "((def|new|field|method|class|async|exit|static)(?=\\s))",
-			"name": "keyword"
 		},
 		"operator": {
 			"match": "(\\||\\&|\\.|\\*|\\!|\\~|\\/|\\<|\\>|\\=|\\,|\\:)",
@@ -148,7 +147,7 @@
 		},
 		"string": {
 			"begin": "\\'",
-			"end": "\\'",
+			"end": "(?<!\\\\)\\'",
 			"beginCaptures": {
 				"0": {
 					"name": "punctuation.definition.string.begin"
