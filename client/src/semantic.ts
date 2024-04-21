@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
 import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, ImportStat, JumpStat, MethodStat, Module, SelectStat, Statement, StaticStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, ConstantExpr, Expression, IdentifierExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, StringExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
+import { AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, ConstantExpr, Expression, IdentifierExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -58,12 +58,18 @@ interface SemanticUnary {
 	rhs: SemanticExpression;
 }
 
+interface SemanticTuple {
+	ast: TupleChainExpr;
+	items: SemanticExpression[];
+}
+
 type SemanticExpression =
 	| SemanticConstant
 	| SemanticIdentifier
 	| SemanticUnary
 	| SemanticPostfix
-	| SemanticAssign;
+	| SemanticAssign
+	| SemanticTuple;
 
 interface SemanticAssignLhs {
 	ast: AssignLhsExpr;
@@ -99,7 +105,8 @@ interface SemanticField {
 
 interface SemanticStatic {
 	ast: StaticStat;
-	name: string;
+	name: SemanticIdentifier;
+	expr: SemanticExpression;
 }
 
 interface SemanticParam {
@@ -117,8 +124,8 @@ interface SemanticMethod {
 
 interface SemanticClass {
 	ast: ClassStat;
-	name: string;
-	superName?: string;
+	name: SemanticIdentifier;
+	// superName?: SemanticPostifx;
 	fields: SemanticField[];
 	statics: Map<string, SemanticStatic>;
 	methods: Map<string, SemanticMethod>;
@@ -269,8 +276,17 @@ function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticCo
 	if (id.hasGenerated()) {
 		return;
 	}
+	let doneFirst = false;
 	for (const tok of id.tokens) {
-		tokens.push(createToken(tok, id.type, id.modifiers));
+		// The first token is always the declaration.
+		if (!doneFirst) {
+			const modifiers = id.modifiers.slice();
+			modifiers.push('declaration');
+			tokens.push(createToken(tok, id.type, modifiers));
+			doneFirst = true;
+		} else {
+			tokens.push(createToken(tok, id.type, id.modifiers));
+		}
 	}
 	id.markGenerated();
 }
@@ -298,6 +314,15 @@ function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticConte
 	}
 }
 
+function generateTokensForTuple(tuple: SemanticTuple, context: SemanticContext, tokens: SemanticToken[]): void {
+	for (const item of tuple.items) {
+		if (item == null) {
+			continue;
+		}
+		generateTokensForExpression(item, context, tokens);
+	}
+}
+
 function generateTokensForExpression(expr: SemanticExpression, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (expr == null || expr.ast == null) {
 		return;
@@ -312,6 +337,8 @@ function generateTokensForExpression(expr: SemanticExpression, context: Semantic
 		generateTokensForAssign(expr as SemanticAssign, context, tokens);
 	} else if (expr.ast.kind === 'PostfixChainExpr') {
 		generateTokensForPostfix(expr as SemanticPostfix, context, tokens);
+	} else if (expr.ast.kind === 'TupleChainExpr') {
+		generateTokensForTuple(expr as SemanticTuple, context, tokens);
 	}
 }
 
@@ -342,7 +369,13 @@ function generateTokensForImport(imprt: SemanticImport, context: SemanticContext
 
 function generateTokensForClass(cls: SemanticClass, context: SemanticContext, tokens: SemanticToken[]): void {
 	tokens.push(createToken(cls.ast.classTok, 'keyword'));
-	tokens.push(createToken(cls.ast.name.token, 'class'));
+	generateTokensForIdentifier(cls.name, context, tokens);
+	for (const [_, sttc] of cls.statics) {
+		tokens.push(createToken(sttc.ast.staticTok, 'keyword'));
+		generateTokensForIdentifier(sttc.name, context, tokens);
+		generateTokensForExpression(sttc.expr, context, tokens);
+	}
+
 	for (const classAst of cls.ast.stats) {
 		if (classAst.kind === 'FieldStat') {
 			tokens.push(createToken(classAst.fieldTok, 'keyword'));
@@ -459,6 +492,13 @@ function processPostfix(postfix: PostfixChainExpr, context: SemanticContext): Se
 	};
 }
 
+function processTuple(tuple: TupleChainExpr, context: SemanticContext): SemanticTuple {
+	return {
+		ast: tuple,
+		items: tuple.values.map(v => processExpression(v, context))
+	};
+}
+
 function processExpression(expr: Expression | NamedArgExpr, context: SemanticContext): SemanticExpression {
 	if (isConstantExpr(expr)) {
 		return processConstant(expr as ConstantExpr, context);
@@ -470,6 +510,8 @@ function processExpression(expr: Expression | NamedArgExpr, context: SemanticCon
 		return processAssign(expr as AssignBaseExpr, context);
 	} else if (expr.kind === 'PostfixChainExpr') {
 		return processPostfix(expr, context);
+	} else if (expr.kind === 'TupleChainExpr') {
+		return processTuple(expr as TupleChainExpr, context);
 	}
 	return undefined;
 }
@@ -487,7 +529,7 @@ function processAssignLhs(expr: AssignLhsExpr, context: SemanticContext): Semant
 	if (expr.kind === 'IdentifierExpr') {
 		return {
 			ast: expr,
-			expr: processIdentifier(expr, context)
+			expr: processIdentifier(expr, context, 'variable', ['local'])
 		};
 	}
 
@@ -596,7 +638,8 @@ function processFields(stat: FieldStat, context: SemanticContext): SemanticField
 function processStatic(stat: StaticStat, context: SemanticContext): SemanticStatic {
 	return {
 		ast: stat,
-		name: stat.name.token.text
+		name: processIdentifier(stat.name, context, 'property', ['readonly']),
+		expr: processExpression(stat.expr, context)
 	};
 }
 
@@ -627,6 +670,7 @@ function processMethod(stat: MethodStat, name: SemanticIdentifier, fields: Seman
 
 function processClass(stat: ClassStat, context: SemanticContext): SemanticClass {
 	let fields: SemanticField[] = [];
+	const name = processIdentifier(stat.name, context, 'class', []);
 	const statics = new Map<string, SemanticStatic>;
 	const methods = new Map<string, SemanticMethod>;
 	for (const classStat of stat.stats) {
@@ -634,7 +678,7 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 			fields = fields.concat(processFields(classStat, context));
 		} else if (classStat.kind === 'StaticStat') {
 			const sttc = processStatic(classStat, context);
-			statics.set(sttc.name, sttc);
+			statics.set(sttc.name.ast.token.text, sttc);
 		} else {
 			processIdentifier(classStat.name, context, 'method');
 		}
@@ -652,7 +696,7 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 
 	return {
 		ast: stat,
-		name: stat.name.token.text,
+		name: name,
 		// superName: stat.super != null ? stat.super.expr : undefined,
 		fields: fields,
 		statics: statics,
@@ -668,14 +712,23 @@ function processModule(module: Module, context: SemanticContext): SemanticModule
 		if (stat.kind === 'ImportStat' || stat.kind === 'ImportAsStat') {
 			imports.push(processImport(stat, context));
 		} else if (stat.kind === 'ClassStat') {
+			processIdentifier(stat.name, context, 'class', []);
+		}
+	}
+	for (const stat of module.statements) {
+		if (stat.kind === 'ClassStat') {
 			classes.push(processClass(stat, context));
-		} else {
+		}
+	}
+	for (const stat of module.statements) {
+		if (stat.kind !== 'ImportStat' && stat.kind !== 'ImportAsStat' && stat.kind !== 'ClassStat') {
 			const sstat = processStatement(stat, context);
 			if (sstat != null) {
 				statements.push(sstat);
 			}
 		}
 	}
+
 	const semanticModule: SemanticModule = {
 		ast: module,
 		imports: imports,

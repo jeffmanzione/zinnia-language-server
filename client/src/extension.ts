@@ -39,7 +39,7 @@ const legend = (function () {
 
 	const tokenModifiersLegend = [
 		'declaration', 'defaultLibrary', 'documentation', 'readonly', 'static', 'abstract', 'deprecated',
-		'modification', 'async'
+		'modification', 'async', 'local'
 	];
 	tokenModifiersLegend.forEach((tokenModifier, index) => tokenModifiers.set(tokenModifier, index));
 
