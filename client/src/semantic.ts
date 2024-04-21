@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
-import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, ImportStat, JumpStat, MethodStat, Module, SelectStat, Statement, StaticStat, WhileStat } from './statements';
+import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, ImportStat, JumpStat, MethodStat, Module, SelectStat, Statement, StaticStat, TryStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, ConstantExpr, Expression, IdentifierExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
+import { AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, ConstantExpr, Expression, IdentifierExpr, NamedArgExpr, NewExpr, ParamExpr, ParensExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -31,7 +31,7 @@ class SemanticIdentifier {
 
 	constructor(ast: IdentifierExpr, type: IdType, modifiers: string[] = [], name?: string) {
 		this.ast = ast;
-		this.id = name == null ? ast.token.text : name;
+		this.id = name ?? ast.token.text;
 		this.type = type;
 		this.modifiers = modifiers;
 	}
@@ -63,13 +63,20 @@ interface SemanticTuple {
 	items: SemanticExpression[];
 }
 
+interface SemanticParens {
+	ast: ParensExpr;
+	expr: SemanticExpression;
+}
+
 type SemanticExpression =
 	| SemanticConstant
 	| SemanticIdentifier
 	| SemanticUnary
 	| SemanticPostfix
 	| SemanticAssign
-	| SemanticTuple;
+	| SemanticTuple
+	| SemanticNamedArg
+	| SemanticParens;
 
 interface SemanticAssignLhs {
 	ast: AssignLhsExpr;
@@ -83,6 +90,12 @@ interface SemanticPostfix {
 	ast: PostfixChainExpr;
 	base: SemanticPrimary;
 	nestedExprs: (SemanticExpression | Token)[];
+}
+
+interface SemanticNamedArg {
+	ast: NamedArgExpr;
+	name: SemanticIdentifier;
+	value: SemanticExpression;
 }
 
 interface SemanticAssign {
@@ -174,11 +187,19 @@ interface SemanticJump {
 	expr?: SemanticExpression;
 }
 
+interface SemanticTry {
+	ast: TryStat;
+	tryStat: SemanticStatement;
+	catchAssign: SemanticAssignLhs;
+	catchStat: SemanticStatement;
+}
+
 type SemanticStatement =
 	| SemanticCompound
 	| SemanticSelect
 	| SemanticIter
 	| SemanticJump
+	| SemanticTry
 	| SemanticExpression;
 
 interface SemanticModule {
@@ -273,20 +294,25 @@ function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, 
 }
 
 function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticContext, tokens: SemanticToken[]): void {
-	if (id.hasGenerated()) {
+	if (id == null || id.hasGenerated()) {
 		return;
 	}
 	let doneFirst = false;
+	const modifiers = id.modifiers.slice();
 	for (const tok of id.tokens) {
 		// The first token is always the declaration.
 		if (!doneFirst) {
-			const modifiers = id.modifiers.slice();
 			modifiers.push('declaration');
-			tokens.push(createToken(tok, id.type, modifiers));
 			doneFirst = true;
-		} else {
-			tokens.push(createToken(tok, id.type, id.modifiers));
 		}
+		tokens.push(
+			createToken(
+				tok,
+				tok.next.kind === TokenKind.SYMBOL_LPAREN && id.type != 'method'
+					? 'function'
+					: id.type,
+				modifiers)
+		);
 	}
 	id.markGenerated();
 }
@@ -299,7 +325,7 @@ function generateTokensForAssign(asgn: SemanticAssign, context: SemanticContext,
 
 function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (pstfx.base != null) { // TODO remove check.
-		generateTokensForIdentifier(pstfx.base, context, tokens);
+		generateTokensForExpression(pstfx.base, context, tokens);
 	}
 	for (const nestedExpr of pstfx.nestedExprs) {
 		if (nestedExpr == null) {
@@ -312,6 +338,11 @@ function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticConte
 			generateTokensForExpression(nestedExpr as SemanticExpression, context, tokens);
 		}
 	}
+}
+
+function generateTokensForNamedArg(arg: SemanticNamedArg, context: SemanticContext, tokens: SemanticToken[]): void {
+	generateTokensForIdentifier(arg.name, context, tokens);
+	generateTokensForExpression(arg.value, context, tokens);
 }
 
 function generateTokensForTuple(tuple: SemanticTuple, context: SemanticContext, tokens: SemanticToken[]): void {
@@ -339,13 +370,18 @@ function generateTokensForExpression(expr: SemanticExpression, context: Semantic
 		generateTokensForPostfix(expr as SemanticPostfix, context, tokens);
 	} else if (expr.ast.kind === 'TupleChainExpr') {
 		generateTokensForTuple(expr as SemanticTuple, context, tokens);
+	} else if (expr.ast.kind === 'NamedArgExpr') {
+		generateTokensForNamedArg(expr as SemanticNamedArg, context, tokens);
+	} else if (expr.ast.kind === 'ParensExpr') {
+		if ((expr as SemanticParens).expr != null) {
+			generateTokensForExpression((expr as SemanticParens).expr, context, tokens);
+		}
 	}
 }
 
 function generateTokensForAssignLhs(asgn: SemanticAssignLhs, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (asgn.ast.kind === 'IdentifierExpr') {
 		generateTokensForExpression(asgn.expr as SemanticIdentifier, context, tokens);
-
 	} else if (isPostfixExpr(asgn.ast)) {
 		generateTokensForPostfix(asgn.expr as SemanticPostfix, context, tokens);
 	} else if (asgn.expr != null) {
@@ -442,6 +478,12 @@ function generateTokensForStatement(stat: SemanticStatement, context: SemanticCo
 		if ((stat as SemanticJump).expr != null) {
 			generateTokensForExpression((stat as SemanticJump).expr, context, tokens);
 		}
+	} else if (stat.ast.kind === 'TryStat') {
+		tokens.push(createToken(stat.ast.tryTok, 'keyword'));
+		tokens.push(createToken(stat.ast.catchTok, 'keyword'));
+		generateTokensForStatement((stat as SemanticTry).tryStat, context, tokens);
+		generateTokensForAssignLhs((stat as SemanticTry).catchAssign, context, tokens);
+		generateTokensForStatement((stat as SemanticTry).catchStat, context, tokens);
 	} else {
 		generateTokensForExpression(stat as SemanticExpression, context, tokens);
 	}
@@ -473,6 +515,7 @@ function processIdentifier(id: IdentifierExpr | NewExpr, context: SemanticContex
 }
 
 function processPostfix(postfix: PostfixChainExpr, context: SemanticContext): SemanticPostfix {
+	const base = processExpression(postfix.lhs, context) as SemanticPrimary;
 	const nestedExprs: (SemanticExpression | Token)[] = [];
 	for (const pfx of postfix.postfixes) {
 		if (pfx.kind === 'ArrayIndexExpr') {
@@ -487,8 +530,16 @@ function processPostfix(postfix: PostfixChainExpr, context: SemanticContext): Se
 	}
 	return {
 		ast: postfix,
-		base: processExpression(postfix.lhs, context) as SemanticPrimary,
+		base: base,
 		nestedExprs: nestedExprs
+	};
+}
+
+function processNamedArg(arg: NamedArgExpr, context: SemanticContext): SemanticNamedArg {
+	return {
+		ast: arg,
+		name: processIdentifier(arg.name, context, 'parameter'),
+		value: processExpression(arg.value, context)
 	};
 }
 
@@ -503,15 +554,22 @@ function processExpression(expr: Expression | NamedArgExpr, context: SemanticCon
 	if (isConstantExpr(expr)) {
 		return processConstant(expr as ConstantExpr, context);
 	} else if (expr.kind === 'IdentifierExpr') {
-		return processIdentifier(expr as IdentifierExpr, context);
+		return processIdentifier(expr, context);
 	} else if (expr.kind === 'UnaryChainExpr') {
-		return processUnary(expr as UnaryChainExpr, context);
+		return processUnary(expr, context);
 	} else if (expr.kind === 'AssignBaseExpr') {
-		return processAssign(expr as AssignBaseExpr, context);
+		return processAssign(expr, context);
 	} else if (expr.kind === 'PostfixChainExpr') {
 		return processPostfix(expr, context);
 	} else if (expr.kind === 'TupleChainExpr') {
-		return processTuple(expr as TupleChainExpr, context);
+		return processTuple(expr, context);
+	} else if (expr.kind === 'NamedArgExpr') {
+		return processNamedArg(expr, context);
+	} else if (expr.kind === 'ParensExpr') {
+		return {
+			ast: expr,
+			expr: processExpression(expr.expr, context)
+		};
 	}
 	return undefined;
 }
@@ -597,6 +655,15 @@ function processStatement(stat: Statement, context: SemanticContext): SemanticSt
 		return {
 			ast: stat,
 			expr: stat.expr == null ? null : processExpression(stat.expr, context)
+		};
+	} else if (stat.kind === 'TryStat') {
+		const tryContext = context.newBlock();
+		const catchContext = context.newBlock();
+		return {
+			ast: stat,
+			tryStat: processStatement(stat.stat, tryContext),
+			catchAssign: processAssignLhs(stat.catchAssign, catchContext),
+			catchStat: processStatement(stat.catchStat, catchContext)
 		};
 	} else {
 		return processExpression(stat as Expression, context);

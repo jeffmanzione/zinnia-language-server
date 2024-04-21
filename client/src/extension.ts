@@ -121,8 +121,8 @@ class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProv
 
 	private _encodeTokenModifiers(strTokenModifiers: string[]): number {
 		let result = 0;
-		for (let i = 0; i < strTokenModifiers.length; i++) {
-			const tokenModifier = strTokenModifiers[i];
+		for (const element of strTokenModifiers) {
+			const tokenModifier = element;
 			if (tokenModifiers.has(tokenModifier)) {
 				result = result | (1 << tokenModifiers.get(tokenModifier)!);
 			} else if (tokenModifier === 'notInLegend') {
