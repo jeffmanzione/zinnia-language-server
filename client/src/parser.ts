@@ -114,7 +114,9 @@ function applyFunctionCall(
 	const args: Expression[] | NamedArgExpr[] =
 		('kind' in expr && expr.kind === 'TupleChainExpr')
 			? (expr as TupleChainExpr).values
-			: (expr as NamedArgExpr[]);
+			: expr instanceof Array
+				? (expr as NamedArgExpr[])
+				: [expr];
 	return {
 		kind: 'FunctionCallExpr',
 		args: args,
@@ -409,7 +411,7 @@ function applyAssignTuple(expr: [Token, AssignLhsExpr[], Token]): AssignTupleExp
 	const [lparen, assigns, rparen] = expr;
 	return {
 		kind: 'AssignTupleExpr',
-		assigns: assigns,
+		assigns: assigns == null ? [] : assigns,
 		lparen: lparen,
 		rparen: rparen
 	};
@@ -419,7 +421,7 @@ function applyAssignArray(expr: [Token, AssignLhsExpr[], Token]): AssignArrayExp
 	const [lbrack, assigns, rbrack] = expr;
 	return {
 		kind: 'AssignArrayExpr',
-		assigns: assigns,
+		assigns: assigns == null ? [] : assigns,
 		lbrack: lbrack,
 		rbrack: rbrack
 	};
@@ -429,6 +431,7 @@ function applyAssignLhs(
 	expr:
 		AssignTupleExpr |
 		AssignArrayExpr |
+		PostfixExpr |
 		IdentifierExpr
 ): AssignLhsExpr {
 	return expr;

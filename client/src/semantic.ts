@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
-import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, ImportStat, MethodStat, Module, SelectStat, Statement, StaticStat, WhileStat } from './statements';
+import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, ImportStat, JumpStat, MethodStat, Module, SelectStat, Statement, StaticStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { AssignLhsExpr, ConstantExpr, Expression, IdentifierExpr, ParamExpr, UnaryChainExpr, UnaryExpr, isConstantExpr } from './expressions';
+import { AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, ConstantExpr, Expression, IdentifierExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, StringExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -18,18 +18,33 @@ type IdType =
 	| 'variable'
 	| 'property'
 	| 'parameter'
+	| 'method'
 	| 'class';
 
 class SemanticIdentifier {
-	ast: IdentifierExpr;
+	ast?: IdentifierExpr;
 	id: string;
 	type: IdType;
+	tokens: Token[] = [];
+	modifiers: string[];
+	tokensGenerated: boolean = false;
 
-	constructor(ast: IdentifierExpr, type: IdType) {
+	constructor(ast: IdentifierExpr, type: IdType, modifiers: string[] = [], name?: string) {
 		this.ast = ast;
-		this.id = ast.token.text;
+		this.id = name == null ? ast.token.text : name;
 		this.type = type;
+		this.modifiers = modifiers;
 	}
+
+	addToken(token: Token): void {
+		this.tokens.push(token);
+	}
+
+	hasGenerated(): boolean {
+		return this.tokensGenerated;
+	}
+
+	markGenerated(): void { this.tokensGenerated = true; }
 }
 
 interface SemanticConstant {
@@ -46,23 +61,40 @@ interface SemanticUnary {
 type SemanticExpression =
 	| SemanticConstant
 	| SemanticIdentifier
-	| SemanticUnary;
+	| SemanticUnary
+	| SemanticPostfix
+	| SemanticAssign;
 
 interface SemanticAssignLhs {
 	ast: AssignLhsExpr;
-	expr: SemanticIdentifier | SemanticAssignLhs[];
+	expr: SemanticIdentifier | SemanticPostfix | SemanticAssignLhs[];
+}
+
+type SemanticPrimary =
+	| SemanticIdentifier;
+
+interface SemanticPostfix {
+	ast: PostfixChainExpr;
+	base: SemanticPrimary;
+	nestedExprs: (SemanticExpression | Token)[];
+}
+
+interface SemanticAssign {
+	ast: AssignBaseExpr;
+	lhs: SemanticAssignLhs;
+	rhs: SemanticExpression;
 }
 
 interface SemanticImport {
 	ast: ImportStat;
-	name: string;
+	name: SemanticIdentifier;
 	source: string;
 }
 
 interface SemanticField {
 	ast: FieldStat | ParamExpr;
 	token: Token;
-	name: string;
+	name: SemanticIdentifier;
 }
 
 interface SemanticStatic {
@@ -72,13 +104,13 @@ interface SemanticStatic {
 
 interface SemanticParam {
 	ast: ParamExpr;
-	name: string;
+	name: SemanticIdentifier;
 	isField: boolean;
 }
 
 interface SemanticMethod {
 	ast: MethodStat;
-	name: string;
+	name: SemanticIdentifier;
 	params: SemanticParam[];
 	stat: SemanticStatement;
 }
@@ -130,10 +162,16 @@ type SemanticIter =
 	| SemanticFor
 	| SemanticForeach;
 
+interface SemanticJump {
+	ast: JumpStat;
+	expr?: SemanticExpression;
+}
+
 type SemanticStatement =
 	| SemanticCompound
 	| SemanticSelect
 	| SemanticIter
+	| SemanticJump
 	| SemanticExpression;
 
 interface SemanticModule {
@@ -149,12 +187,27 @@ class Block {
 
 	constructor(parent?: Block) { this.parent = parent; }
 
-	lookupOrCreateIdentifier(id: IdentifierExpr, type: IdType): SemanticIdentifier {
-		const foundId = this.findIdentifier(id.token.text);
+	createIdentifier(id: IdentifierExpr, type: IdType): SemanticIdentifier {
+		const sid = new SemanticIdentifier(id, type);
+		this.members.set(sid.id, sid);
+		return sid;
+	}
+
+	lookupOrCreateIdentifier(id: IdentifierExpr | NewExpr | string, type: IdType, modifiers: string[] = []): SemanticIdentifier {
+		const idText = typeof id === 'string' ? id : id.token.text;
+		const foundId = this.findIdentifier(idText);
 		if (foundId != null) {
 			return foundId;
 		}
-		const sid = new SemanticIdentifier(id, type);
+		const sid = new SemanticIdentifier(
+			typeof id === 'string'
+				? { kind: 'IdentifierExpr', token: null }
+				: ('kind' in id && id.kind === 'NewExpr')
+					? { kind: 'IdentifierExpr', token: id.token }
+					: id,
+			type,
+			modifiers,
+			idText);
 		this.members.set(sid.id, sid);
 		return sid;
 	}
@@ -174,9 +227,17 @@ class SemanticContext {
 	module: SemanticModule;
 	block: Block;
 
+	constructor(block: Block = new Block()) {
+		this.block = block;
+	}
+
+	setModule(module: SemanticModule): void {
+		this.module = module;
+	}
+
 	newBlock(): SemanticContext {
-		const copy = structuredClone(this);
-		copy.block = new Block(this.block);
+		const copy = new SemanticContext(new Block(this.block));
+		copy.setModule(this.module);
 		return copy;
 	}
 }
@@ -197,31 +258,72 @@ function generateTokensForConstant(cnst: SemanticConstant, context: SemanticCont
 
 function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, tokens: SemanticToken[]): void {
 	for (const un of unary.ast.unaries) {
-		if (un.kind === TokenKind.KEYWORD_ASYNC) {
+		if (un.kind === TokenKind.KEYWORD_AWAIT) {
 			tokens.push(createToken(un, 'keyword'));
 		}
 	}
 	generateTokensForExpression(unary.rhs, context, tokens);
 }
 
+function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (id.hasGenerated()) {
+		return;
+	}
+	for (const tok of id.tokens) {
+		tokens.push(createToken(tok, id.type, id.modifiers));
+	}
+	id.markGenerated();
+}
+
+
+function generateTokensForAssign(asgn: SemanticAssign, context: SemanticContext, tokens: SemanticToken[]): void {
+	generateTokensForAssignLhs(asgn.lhs, context, tokens);
+	generateTokensForExpression(asgn.rhs, context, tokens);
+}
+
+function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (pstfx.base != null) { // TODO remove check.
+		generateTokensForIdentifier(pstfx.base, context, tokens);
+	}
+	for (const nestedExpr of pstfx.nestedExprs) {
+		if (nestedExpr == null) {
+			continue;
+		}
+		if ('nextToken' in nestedExpr) {
+			const tok = nestedExpr as Token;
+			tokens.push(createToken(tok, tok.next.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property'));
+		} else {
+			generateTokensForExpression(nestedExpr as SemanticExpression, context, tokens);
+		}
+	}
+}
+
 function generateTokensForExpression(expr: SemanticExpression, context: SemanticContext, tokens: SemanticToken[]): void {
-	if (expr == null) {
+	if (expr == null || expr.ast == null) {
 		return;
 	}
 	if (isConstantExpr(expr.ast)) {
 		generateTokensForConstant(expr as SemanticConstant, context, tokens);
+	} else if (expr.ast.kind === 'IdentifierExpr') {
+		generateTokensForIdentifier(expr as SemanticIdentifier, context, tokens);
 	} else if (expr.ast.kind === 'UnaryChainExpr') {
 		generateTokensForUnary(expr as SemanticUnary, context, tokens);
+	} else if (expr.ast.kind === 'AssignBaseExpr') {
+		generateTokensForAssign(expr as SemanticAssign, context, tokens);
+	} else if (expr.ast.kind === 'PostfixChainExpr') {
+		generateTokensForPostfix(expr as SemanticPostfix, context, tokens);
 	}
 }
 
-function generateTokensForSemanticAssign(asgn: SemanticAssignLhs, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForAssignLhs(asgn: SemanticAssignLhs, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (asgn.ast.kind === 'IdentifierExpr') {
 		generateTokensForExpression(asgn.expr as SemanticIdentifier, context, tokens);
 
-	} else {
+	} else if (isPostfixExpr(asgn.ast)) {
+		generateTokensForPostfix(asgn.expr as SemanticPostfix, context, tokens);
+	} else if (asgn.expr != null) {
 		for (const expr of asgn.expr as SemanticAssignLhs[]) {
-			generateTokensForSemanticAssign(expr, context, tokens);
+			generateTokensForAssignLhs(expr, context, tokens);
 		}
 	}
 }
@@ -234,7 +336,7 @@ function generateTokensForImport(imprt: SemanticImport, context: SemanticContext
 	if (imprt.ast.source.kind === 'StringExpr') {
 		tokens.push(createToken(imprt.ast.source.token, 'string'));
 	} else {
-		tokens.push(createToken(imprt.ast.source.token, 'variable', ['defaultLibrary']));
+		generateTokensForIdentifier(imprt.name, context, tokens);
 	}
 }
 
@@ -256,12 +358,12 @@ function generateTokensForClass(cls: SemanticClass, context: SemanticContext, to
 		if (meth.ast.methodTok != null) {
 			tokens.push(createToken(meth.ast.methodTok, 'keyword'));
 		}
-		tokens.push(createToken(meth.ast.name.token, 'method'));
+		generateTokensForIdentifier(meth.name, context, tokens);
 		if (meth.ast.asyncTok != null) {
 			tokens.push(createToken(meth.ast.asyncTok, 'keyword', ['async']));
 		}
 		for (const param of meth.params) {
-			tokens.push(createToken(param.ast.name.token, 'property'));
+			generateTokensForIdentifier(param.name, context, tokens);
 			if (param.isField) {
 				tokens.push(createToken(param.ast.field, 'keyword'));
 			}
@@ -295,13 +397,20 @@ function generateTokensForStatement(stat: SemanticStatement, context: SemanticCo
 		generateTokensForStatement((stat as SemanticFor).body, context, tokens);
 	} else if (stat.ast.kind === 'ForeachStat') {
 		tokens.push(createToken(stat.ast.forTok, 'keyword'));
-		generateTokensForSemanticAssign((stat as SemanticForeach).lhs, context, tokens);
+		generateTokensForAssignLhs((stat as SemanticForeach).lhs, context, tokens);
 		generateTokensForExpression((stat as SemanticForeach).rhs, context, tokens);
 		generateTokensForStatement((stat as SemanticForeach).body, context, tokens);
 	} else if (stat.ast.kind === 'WhileStat') {
 		tokens.push(createToken(stat.ast.whileTok, 'keyword'));
 		generateTokensForExpression((stat as SemanticWhile).cond, context, tokens);
 		generateTokensForStatement((stat as SemanticWhile).body, context, tokens);
+	} else if (stat.ast.kind === 'JumpStat') {
+		tokens.push(createToken(stat.ast.token, 'keyword'));
+		if ((stat as SemanticJump).expr != null) {
+			generateTokensForExpression((stat as SemanticJump).expr, context, tokens);
+		}
+	} else {
+		generateTokensForExpression(stat as SemanticExpression, context, tokens);
 	}
 }
 
@@ -324,17 +433,43 @@ function processUnary(unary: UnaryChainExpr, context: SemanticContext): Semantic
 	};
 }
 
-function processIdentifier(id: IdentifierExpr, context: SemanticContext): SemanticIdentifier {
-	return context.block.lookupOrCreateIdentifier(id, 'variable');
+function processIdentifier(id: IdentifierExpr | NewExpr, context: SemanticContext, type: IdType = 'variable', modifiers: string[] = []): SemanticIdentifier {
+	const identifier = context.block.lookupOrCreateIdentifier(id, type, modifiers);
+	identifier.addToken(id.token);
+	return identifier;
 }
 
-function processExpression(expr: Expression, context: SemanticContext): SemanticExpression {
+function processPostfix(postfix: PostfixChainExpr, context: SemanticContext): SemanticPostfix {
+	const nestedExprs: (SemanticExpression | Token)[] = [];
+	for (const pfx of postfix.postfixes) {
+		if (pfx.kind === 'ArrayIndexExpr') {
+			nestedExprs.push(processExpression(pfx.indices, context));
+		} else if (pfx.kind === 'FunctionCallExpr' && pfx.args != null) {
+			for (const arg of pfx.args) {
+				nestedExprs.push(processExpression(arg, context));
+			}
+		} else if (pfx.kind === 'MemberAccessExpr') {
+			nestedExprs.push(pfx.field.token);
+		}
+	}
+	return {
+		ast: postfix,
+		base: processExpression(postfix.lhs, context) as SemanticPrimary,
+		nestedExprs: nestedExprs
+	};
+}
+
+function processExpression(expr: Expression | NamedArgExpr, context: SemanticContext): SemanticExpression {
 	if (isConstantExpr(expr)) {
 		return processConstant(expr as ConstantExpr, context);
 	} else if (expr.kind === 'IdentifierExpr') {
 		return processIdentifier(expr as IdentifierExpr, context);
 	} else if (expr.kind === 'UnaryChainExpr') {
 		return processUnary(expr as UnaryChainExpr, context);
+	} else if (expr.kind === 'AssignBaseExpr') {
+		return processAssign(expr as AssignBaseExpr, context);
+	} else if (expr.kind === 'PostfixChainExpr') {
+		return processPostfix(expr, context);
 	}
 	return undefined;
 }
@@ -352,12 +487,28 @@ function processAssignLhs(expr: AssignLhsExpr, context: SemanticContext): Semant
 	if (expr.kind === 'IdentifierExpr') {
 		return {
 			ast: expr,
-			expr: context.block.lookupOrCreateIdentifier(expr, 'variable')
+			expr: processIdentifier(expr, context)
+		};
+	}
+
+	if (isPostfixExpr(expr)) {
+		// TODO: handle postfix
+		return {
+			ast: expr,
+			expr: processPostfix(expr as PostfixChainExpr, context)
 		};
 	}
 	return {
 		ast: expr,
-		expr: expr.assigns.map(a => processAssignLhs(a, context))
+		expr: (expr as AssignTupleExpr | AssignArrayExpr).assigns.map(a => processAssignLhs(a, context))
+	};
+}
+
+function processAssign(expr: AssignBaseExpr, context: SemanticContext): SemanticAssign {
+	return {
+		ast: expr,
+		lhs: processAssignLhs(expr.lhs, context),
+		rhs: processExpression(expr.rhs, context)
 	};
 }
 
@@ -400,12 +551,17 @@ function processStatement(stat: Statement, context: SemanticContext): SemanticSt
 			rhs: processExpression(stat.iter, newContext),
 			body: processStatement(stat.stat, newContext)
 		};
+	} else if (stat.kind === 'JumpStat') {
+		return {
+			ast: stat,
+			expr: stat.expr == null ? null : processExpression(stat.expr, context)
+		};
 	} else {
 		return processExpression(stat as Expression, context);
 	}
 }
 
-function createImportName(stat: ImportStat): string {
+function createImportName(stat: ImportStat, context: SemanticContext): SemanticIdentifier {
 	let name: string;
 	if (stat.name == null) {
 		name = stat.source.token.text;
@@ -413,17 +569,18 @@ function createImportName(stat: ImportStat): string {
 			name = name.substring(1, name.length - 2);
 			const pathParts = name.split('/');
 			name = pathParts[pathParts.length - 1];
+			return context.block.lookupOrCreateIdentifier(name, 'variable', ['defaultLibrary']);
 		}
-	} else {
-		name = stat.name.token.text;
+		return processIdentifier(stat.source as IdentifierExpr, context, 'variable', ['defaultLibrary']);
 	}
-	return name;
+	return processIdentifier(stat.name, context, 'variable', ['defaultLibrary']);
+
 }
 
 function processImport(stat: ImportStat, context: SemanticContext): SemanticImport {
 	return {
 		ast: stat,
-		name: createImportName(stat),
+		name: createImportName(stat, context),
 		source: stat.source.token.text
 	};
 }
@@ -431,7 +588,7 @@ function processImport(stat: ImportStat, context: SemanticContext): SemanticImpo
 function processFields(stat: FieldStat, context: SemanticContext): SemanticField[] {
 	const fields: SemanticField[] = [];
 	for (const id of stat.fields) {
-		fields.push({ ast: stat, token: id.token, name: id.token.text });
+		fields.push({ ast: stat, token: id.token, name: processIdentifier(id, context, 'property') });
 	}
 	return fields;
 }
@@ -443,28 +600,28 @@ function processStatic(stat: StaticStat, context: SemanticContext): SemanticStat
 	};
 }
 
-function processMethod(stat: MethodStat, fields: SemanticField[], context: SemanticContext): SemanticMethod {
+function processMethod(stat: MethodStat, name: SemanticIdentifier, fields: SemanticField[], context: SemanticContext): SemanticMethod {
 	const params: SemanticParam[] = [];
-	const stats: SemanticStatement[] = [];
+	const newContext = context.newBlock();
 	for (const param of stat.params) {
 		if (param.field != null) {
 			fields.push({
 				ast: param,
-				name: param.name.token.text,
+				name: processIdentifier(param.name, context, 'property'),
 				token: param.name.token
 			});
 		}
 		params.push({
 			ast: param,
-			name: param.name.token.text,
+			name: processIdentifier(param.name, newContext, 'parameter'),
 			isField: param.field != null
 		});
 	}
 	return {
 		ast: stat,
-		name: stat.name.token.text,
+		name: name,
 		params: params,
-		stat: processStatement(stat.stat, context)
+		stat: processStatement(stat.stat, newContext)
 	};
 }
 
@@ -479,10 +636,20 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 			const sttc = processStatic(classStat, context);
 			statics.set(sttc.name, sttc);
 		} else {
-			const meth = processMethod(classStat, fields, context);
-			methods.set(meth.name, meth);
+			processIdentifier(classStat.name, context, 'method');
 		}
 	}
+	for (const classStat of stat.stats) {
+		if (classStat.kind === 'MethodStat') {
+			const meth = processMethod(
+				classStat,
+				processIdentifier(classStat.name, context, 'method'),
+				fields,
+				context);
+			methods.set(meth.name.id, meth);
+		}
+	}
+
 	return {
 		ast: stat,
 		name: stat.name.token.text,

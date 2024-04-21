@@ -206,6 +206,7 @@ export interface AssignArrayExpr {
 
 export type AssignLhsExpr =
 	| IdentifierExpr
+	| PostfixExpr
 	| AssignTupleExpr
 	| AssignArrayExpr;
 
@@ -265,6 +266,9 @@ const constantExprs = new Set([
 ]);
 
 export function isConstantExpr(expr: object): boolean {
+	if (expr == null) {
+		return false;
+	}
 	if (!('kind' in expr)) {
 		return false;
 	}
@@ -302,6 +306,15 @@ export type PostfixExpr1 =
 export type PostfixExpr =
 	| PrimaryExpr
 	| PostfixChainExpr;
+
+
+export function isPostfixExpr(expr: object): boolean {
+	if (isPrimaryExpr(expr)) {
+		return true;
+	}
+	return 'kind' in expr && expr.kind === 'PostfixChainExpr';
+}
+
 
 export type UnaryExpr =
 	| UnaryChainExpr
