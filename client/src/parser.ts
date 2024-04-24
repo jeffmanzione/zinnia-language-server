@@ -1,6 +1,5 @@
 import * as parsec from 'typescript-parsec';
-import { rep_sc, rule } from 'typescript-parsec';
-import { alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, seq, tok } from 'typescript-parsec';
+import { alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, rep_sc, rule, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
 import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr, AnonExpr, AnnotationExpr, NoneExpr } from './expressions';
 import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat, FunctionStat, MethodStat, FieldStat, StaticStat, ClassStat, ClassMemberStat } from './statements';
@@ -271,14 +270,14 @@ function applyIn(
 	expr: [AddExpr, Token, AddExpr] | AddExpr
 ): InExpr | AddExpr {
 	if ('kind' in expr) {
-		return expr as AddExpr;
+		return expr;
 	}
 	const [lhs, is, rhs] = expr;
 	return {
 		kind: 'InExpr',
 		lhs: lhs,
 		rhs: rhs,
-		is: is
+		inTok: is
 	};
 }
 
@@ -371,7 +370,7 @@ function applyIs(expr: [OrExpr, Token, OrExpr] | OrExpr): IsExpr | OrExpr {
 		kind: 'IsExpr',
 		lhs: lhs,
 		rhs: rhs,
-		is: is
+		isTok: is
 	};
 }
 
@@ -411,7 +410,7 @@ function applyAssignTuple(expr: [Token, AssignLhsExpr[], Token]): AssignTupleExp
 	const [lparen, assigns, rparen] = expr;
 	return {
 		kind: 'AssignTupleExpr',
-		assigns: assigns == null ? [] : assigns,
+		assigns: assigns ?? [],
 		lparen: lparen,
 		rparen: rparen
 	};
@@ -421,7 +420,7 @@ function applyAssignArray(expr: [Token, AssignLhsExpr[], Token]): AssignArrayExp
 	const [lbrack, assigns, rbrack] = expr;
 	return {
 		kind: 'AssignArrayExpr',
-		assigns: assigns == null ? [] : assigns,
+		assigns: assigns ?? [],
 		lbrack: lbrack,
 		rbrack: rbrack
 	};
@@ -443,7 +442,7 @@ function applyAssign(
 		ConditionExpr
 ): AssignExpr {
 	if ('kind' in expr) {
-		return expr as ConditionExpr;
+		return expr;
 	}
 	const [lhs, eq, rhs] = expr;
 	return {
@@ -612,7 +611,7 @@ function applyJump(
 	if ('text' in expr) {
 		return {
 			kind: 'JumpStat',
-			token: expr as Token
+			token: expr
 		};
 	}
 	const [ret, retVal] = expr;
@@ -671,7 +670,7 @@ function applyFunction(
 			isNamed: true,
 			asyncTok: asyncTok,
 			stat: stat,
-			annots: annots === undefined ? [] : annots
+			annots: annots ?? []
 		};
 	}
 	if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
@@ -686,7 +685,7 @@ function applyFunction(
 			isNamed: true,
 			asyncTok: asyncTok,
 			stat: stat,
-			annots: annots === undefined ? [] : annots
+			annots: annots ?? []
 		};
 	}
 	return {
@@ -699,7 +698,7 @@ function applyFunction(
 		isNamed: false,
 		asyncTok: asyncTok,
 		stat: stat,
-		annots: annots === undefined ? [] : annots
+		annots: annots ?? []
 	};
 }
 
@@ -730,7 +729,7 @@ function applyMethod(
 			isNamed: true,
 			asyncTok: asyncTok,
 			stat: stat,
-			annots: annots === undefined ? [] : annots
+			annots: annots ?? []
 		};
 	} else if (paramsExpr.length == 3 && (paramsExpr[1] instanceof Array || paramsExpr[1] === undefined)) {
 		const [_, params, __] = paramsExpr;
@@ -744,7 +743,7 @@ function applyMethod(
 			isNamed: true,
 			asyncTok: asyncTok,
 			stat: stat,
-			annots: annots === undefined ? [] : annots
+			annots: annots ?? []
 		};
 	}
 	return {
@@ -757,7 +756,7 @@ function applyMethod(
 		isNamed: false,
 		asyncTok: asyncTok,
 		stat: stat,
-		annots: annots === undefined ? [] : annots
+		annots: annots ?? []
 	};
 }
 
@@ -857,7 +856,7 @@ function applyClass(expr: [
 			colon: colon,
 			super: superClass,
 			stats: [body],
-			annots: annots === undefined ? [] : annots
+			annots: annots ?? []
 		};
 	}
 	const [lbrace, stats, rbrace] = body;
@@ -870,7 +869,7 @@ function applyClass(expr: [
 		lbrace: lbrace,
 		rbrace: rbrace,
 		stats: stats,
-		annots: annots === undefined ? [] : annots
+		annots: annots ?? []
 	};
 }
 

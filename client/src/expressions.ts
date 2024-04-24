@@ -146,7 +146,7 @@ export interface InExpr {
 	kind: 'InExpr';
 	lhs: AddExpr;
 	rhs: AddExpr;
-	is: Token;
+	inTok: Token;
 }
 
 export interface RelationChainExpr {
@@ -177,7 +177,7 @@ export interface IsExpr {
 	kind: 'IsExpr';
 	lhs: OrExpr;
 	rhs: OrExpr;
-	is: Token;
+	isTok: Token;
 }
 
 export interface ConditionBaseExpr {
