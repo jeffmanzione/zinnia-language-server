@@ -3,12 +3,12 @@
 	"description": "Zinnia Lanugage Server",
 	"author": "Jeff Manzione",
 	"license": "MIT",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
 	},
-	"publisher": "jeffmanzione",
+	"publisher": "jeffreymanzione",
 	"categories": [],
 	"keywords": [
 		"multi-root ready"
@@ -81,6 +81,7 @@
 		"typescript": "^5.4.5"
 	},
 	"dependencies": {
-		"tsc": "^2.0.4"
+		"tsc": "^2.0.4",
+		"typescript-parsec": "^0.3.4"
 	}
 }
