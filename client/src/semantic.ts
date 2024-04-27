@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
 import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, Statement, StaticStat, TryStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { AddChainExpr, AndChainExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
+import { AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -18,8 +18,10 @@ type IdType =
 	| 'variable'
 	| 'property'
 	| 'parameter'
+	| 'function'
 	| 'method'
-	| 'class';
+	| 'class'
+	| 'decorator';
 
 class SemanticIdentifier {
 	ast?: IdentifierExpr;
@@ -122,6 +124,19 @@ interface SemanticRange {
 	inc?: SemanticExpression;
 }
 
+interface SemanticAnon {
+	ast: AnonExpr;
+	params: SemanticParam[];
+	stat: SemanticStatement;
+}
+
+interface SemanticAnnotation {
+	ast: AnnotationExpr;
+	firstId: SemanticIdentifier;
+	secondId?: Token;  // TODO: identifiers should look into fields too.
+	params: SemanticExpression[];
+}
+
 type SemanticExpression =
 	| SemanticConstant
 	| SemanticIdentifier
@@ -135,7 +150,8 @@ type SemanticExpression =
 	| SemanticIs
 	| SemanticIn
 	| SemanticCondition
-	| SemanticRange;
+	| SemanticRange
+	| SemanticAnon;
 
 interface SemanticAssignLhs {
 	ast: AssignLhsExpr;
@@ -192,15 +208,17 @@ interface SemanticMethod {
 	name: SemanticIdentifier;
 	params: SemanticParam[];
 	stat: SemanticStatement;
+	annots: SemanticAnnotation[];
 }
 
 interface SemanticClass {
 	ast: ClassStat;
 	name: SemanticIdentifier;
-	// superName?: SemanticPostifx;
+	superName?: SemanticExpression;
 	fields: SemanticField[];
 	statics: Map<string, SemanticStatic>;
 	methods: Map<string, SemanticMethod>;
+	annots: SemanticAnnotation[];
 }
 
 interface SemanticCompound {
@@ -263,6 +281,7 @@ interface SemanticFunction {
 	name: SemanticIdentifier;
 	params: SemanticParam[];
 	stat: SemanticStatement;
+	annots: SemanticAnnotation[];
 }
 
 type SemanticStatement =
@@ -396,6 +415,19 @@ function generateTokensForAssign(asgn: SemanticAssign, context: SemanticContext,
 	generateTokensForExpression(asgn.rhs, context, tokens);
 }
 
+
+function generateTokensForAnnotation(annot: SemanticAnnotation, context: SemanticContext, tokens: SemanticToken[]): void {
+	generateTokensForIdentifier(annot.firstId, context, tokens);
+	if (annot.secondId != null) {
+		tokens.push(createToken(annot.secondId, 'decorator'));
+	}
+	if (annot.params != null) {
+		for (const param of annot.params) {
+			generateTokensForExpression(param, context, tokens);
+		}
+	}
+}
+
 function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (pstfx.base != null) { // TODO remove check.
 		generateTokensForExpression(pstfx.base, context, tokens);
@@ -470,6 +502,19 @@ function generateTokensForRange(rng: SemanticRange, context: SemanticContext, to
 	}
 }
 
+function generateTokensForAnon(anon: SemanticAnon, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (anon.ast.asyncTok != null) {
+		tokens.push(createToken(anon.ast.asyncTok, 'keyword', ['async']));
+	}
+	for (const param of anon.params) {
+		generateTokensForIdentifier(param.name, context, tokens);
+		if (param.isField) {
+			tokens.push(createToken(param.ast.field, 'keyword'));
+		}
+	}
+	generateTokensForStatement(anon.stat, context, tokens);
+}
+
 function generateTokensForExpression(expr: SemanticExpression, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (expr?.ast == null) {
 		return;
@@ -500,6 +545,8 @@ function generateTokensForExpression(expr: SemanticExpression, context: Semantic
 		return generateTokensForCondition(expr as SemanticCondition, context, tokens);
 	} else if (expr.ast.kind === 'RangeExpr') {
 		return generateTokensForRange(expr as SemanticRange, context, tokens);
+	} else if (expr.ast.kind === 'AnonExpr') {
+		return generateTokensForAnon(expr as SemanticAnon, context, tokens);
 	} else if (isOpExpr(expr.ast)) {
 		generateTokensForOp(expr as SemanticOp, context, tokens);
 	}
@@ -530,6 +577,11 @@ function generateTokensForImport(imprt: SemanticImport, context: SemanticContext
 }
 
 function generateTokensForMethod(meth: SemanticMethod, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (meth.annots != null) {
+		for (const annot of meth.annots) {
+			generateTokensForAnnotation(annot, context, tokens);
+		}
+	}
 	if (meth.ast.methodTok != null) {
 		tokens.push(createToken(meth.ast.methodTok, 'keyword'));
 	}
@@ -547,8 +599,19 @@ function generateTokensForMethod(meth: SemanticMethod, context: SemanticContext,
 }
 
 function generateTokensForClass(cls: SemanticClass, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (cls.annots != null) {
+		for (const annot of cls.annots) {
+			generateTokensForAnnotation(annot, context, tokens);
+		}
+	}
+
 	tokens.push(createToken(cls.ast.classTok, 'keyword'));
 	generateTokensForIdentifier(cls.name, context, tokens);
+
+	if (cls.superName != null) {
+		generateTokensForExpression(cls.superName, context, tokens);
+	}
+
 	for (const [_, sttc] of cls.statics) {
 		tokens.push(createToken(sttc.ast.staticTok, 'keyword'));
 		generateTokensForIdentifier(sttc.name, context, tokens);
@@ -572,6 +635,11 @@ function generateTokensForClass(cls: SemanticClass, context: SemanticContext, to
 }
 
 function generateTokensForFunction(func: SemanticFunction, context: SemanticContext, tokens: SemanticToken[]): void {
+	if (func.annots != null) {
+		for (const annot of func.annots) {
+			generateTokensForAnnotation(annot, context, tokens);
+		}
+	}
 	if (func.ast.defTok != null) {
 		tokens.push(createToken(func.ast.defTok, 'keyword'));
 	}
@@ -667,6 +735,24 @@ function processIdentifier(id: IdentifierExpr | NewExpr, context: SemanticContex
 	return identifier;
 }
 
+
+function processAnnotation(annot: AnnotationExpr, context: SemanticContext): SemanticAnnotation {
+	const first = processIdentifier(annot.firstPart, context, 'decorator');
+	const second = annot?.secondPart?.token;
+	const params = [];
+	if (annot.args != null) {
+		for (const arg of annot.args) {
+			params.push(processExpression(arg, context));
+		}
+	}
+	return {
+		ast: annot,
+		firstId: first,
+		secondId: second,
+		params: params
+	};
+}
+
 function processPostfix(postfix: PostfixChainExpr, context: SemanticContext): SemanticPostfix {
 	const base = processExpression(postfix.lhs, context) as SemanticPrimary;
 	const nestedExprs: (SemanticExpression | Token)[] = [];
@@ -745,6 +831,22 @@ function processRange(expr: RangeExpr, context: SemanticContext): SemanticRange 
 	};
 }
 
+function processAnon(expr: AnonExpr, context: SemanticContext): SemanticAnon {
+	const params: SemanticParam[] = [];
+	const newContext = context.newBlock();
+	for (const param of expr.params) {
+		params.push({
+			ast: param,
+			name: processIdentifier(param.name, newContext, 'parameter'),
+			isField: param.field != null
+		});
+	}
+	return {
+		ast: expr,
+		params: params,
+		stat: processStatement(expr.expr, newContext)
+	};
+}
 
 function processExpression(expr: Expression | NamedArgExpr, context: SemanticContext): SemanticExpression {
 	if (isConstantExpr(expr)) {
@@ -774,6 +876,8 @@ function processExpression(expr: Expression | NamedArgExpr, context: SemanticCon
 		return processCondition(expr, context);
 	} else if (expr.kind === 'RangeExpr') {
 		return processRange(expr, context);
+	} else if (expr.kind === 'AnonExpr') {
+		return processAnon(expr, context);
 	} else if (isOpExpr(expr)) {
 		return processOp(expr as OpExpr, context);
 	}
@@ -820,7 +924,13 @@ function processAssign(expr: AssignBaseExpr, context: SemanticContext): Semantic
 
 
 function processFunction(stat: FunctionStat, context: SemanticContext): SemanticFunction {
-	const name = processIdentifier(stat.name, context, 'method');
+	const annots = [];
+	if (stat.annots !== null) {
+		for (const annot of stat.annots) {
+			annots.push(processAnnotation(annot, context));
+		}
+	}
+	const name = processIdentifier(stat.name, context, 'function');
 	const params: SemanticParam[] = [];
 	const newContext = context.newBlock();
 	for (const param of stat.params) {
@@ -834,10 +944,10 @@ function processFunction(stat: FunctionStat, context: SemanticContext): Semantic
 		ast: stat,
 		name: name,
 		params: params,
-		stat: processStatement(stat.stat, newContext)
+		stat: processStatement(stat.stat, newContext),
+		annots: annots
 	};
 }
-
 
 function processStatement(stat: Statement, context: SemanticContext): SemanticStatement {
 	if (stat.kind === 'CompoundStat') {
@@ -945,6 +1055,12 @@ function processStatic(stat: StaticStat, context: SemanticContext): SemanticStat
 }
 
 function processMethod(stat: MethodStat, name: SemanticIdentifier, fields: SemanticField[], context: SemanticContext): SemanticMethod {
+	const annots = [];
+	if (stat.annots !== null) {
+		for (const annot of stat.annots) {
+			annots.push(processAnnotation(annot, context));
+		}
+	}
 	const params: SemanticParam[] = [];
 	const newContext = context.newBlock();
 	for (const param of stat.params) {
@@ -965,13 +1081,22 @@ function processMethod(stat: MethodStat, name: SemanticIdentifier, fields: Seman
 		ast: stat,
 		name: name,
 		params: params,
-		stat: processStatement(stat.stat, newContext)
+		stat: processStatement(stat.stat, newContext),
+		annots
 	};
 }
 
 function processClass(stat: ClassStat, context: SemanticContext): SemanticClass {
+	const annots = [];
+	if (stat.annots !== null) {
+		for (const annot of stat.annots) {
+			annots.push(processAnnotation(annot, context));
+		}
+	}
+
 	let fields: SemanticField[] = [];
 	const name = processIdentifier(stat.name, context, 'class', []);
+	const sup = stat.super != null ? processExpression(stat.super, context) : null;
 	const statics = new Map<string, SemanticStatic>;
 	const methods = new Map<string, SemanticMethod>;
 	for (const classStat of stat.stats) {
@@ -998,10 +1123,11 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 	return {
 		ast: stat,
 		name: name,
-		// superName: stat.super != null ? stat.super.expr : undefined,
+		superName: sup,
 		fields: fields,
 		statics: statics,
-		methods: methods
+		methods: methods,
+		annots: annots
 	};
 }
 

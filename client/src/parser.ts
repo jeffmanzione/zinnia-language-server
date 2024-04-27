@@ -643,12 +643,36 @@ function applyParam(
 	};
 }
 
-function applyAnnotation(expr: [Token, PostfixExpr]): AnnotationExpr {
-	const [at, pfExpr] = expr;
+function applyAnnotation(expr:
+	[
+		Token, IdentifierExpr, IdentifierExpr,
+		[Token, TupleExpr | NamedArgExpr[], Token]
+	]
+): AnnotationExpr {
+	const [at, firstPart, secondPart, thirdPart] = expr;
+	if (thirdPart == null) {
+		return {
+			kind: 'AnnotationExpr',
+			at: at,
+			firstPart: firstPart,
+			secondPart: secondPart,
+		};
+	}
+	const [lparen, argsExpr, rparen] = thirdPart;
+	const args: Expression[] | NamedArgExpr[] =
+		('kind' in argsExpr && argsExpr.kind === 'TupleChainExpr')
+			? (argsExpr as TupleChainExpr).values
+			: argsExpr instanceof Array
+				? (argsExpr as NamedArgExpr[])
+				: [argsExpr];
 	return {
 		kind: 'AnnotationExpr',
 		at: at,
-		expr: pfExpr
+		firstPart: firstPart,
+		secondPart: secondPart,
+		args: args,
+		lparen: lparen,
+		rparen: rparen
 	};
 }
 
@@ -1723,7 +1747,23 @@ ANNOTATION.setPattern(
 			opt_sc(tok(TokenKind.NEWLINE)),
 			seq(
 				tok(TokenKind.SYMBOL_AT),
-				POSTFIX
+				IDENTIFIER,
+				opt_sc(
+					kright(
+						tok(TokenKind.SYMBOL_PERIOD),
+						IDENTIFIER
+					)
+				),
+				opt_sc(
+					seq(
+						tok(TokenKind.SYMBOL_LPAREN),
+						alt_sc(
+							list_sc(NAMED_ARG, tok(TokenKind.SYMBOL_COMMA)),
+							TUPLE
+						),
+						tok(TokenKind.SYMBOL_RPAREN)
+					)
+				)
 			),
 			opt_sc(tok(TokenKind.NEWLINE))
 		),

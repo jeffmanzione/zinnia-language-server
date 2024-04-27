@@ -239,7 +239,11 @@ export interface AnonExpr {
 export interface AnnotationExpr {
 	kind: 'AnnotationExpr';
 	at: Token;
-	expr: PostfixExpr;
+	firstPart: IdentifierExpr;
+	secondPart?: IdentifierExpr;
+	args?: Expression[] | NamedArgExpr[];
+	lparen?: Token;
+	rparen?: Token;
 }
 
 export type ConstantExpr =
