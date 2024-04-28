@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
 import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, Statement, StaticStat, TryStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
+import { AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -63,6 +63,16 @@ interface SemanticUnary {
 interface SemanticTuple {
 	ast: TupleChainExpr;
 	items: SemanticExpression[];
+}
+
+interface SemanticArray {
+	ast: ArrayExpr;
+	items: SemanticExpression[];
+}
+
+interface SemanticMap {
+	ast: MapExpr;
+	entries: Map<SemanticExpression, SemanticExpression>;
 }
 
 interface SemanticParens {
@@ -144,6 +154,8 @@ type SemanticExpression =
 	| SemanticPostfix
 	| SemanticAssign
 	| SemanticTuple
+	| SemanticArray
+	| SemanticMap
 	| SemanticNamedArg
 	| SemanticParens
 	| SemanticOp
@@ -459,6 +471,26 @@ function generateTokensForTuple(tuple: SemanticTuple, context: SemanticContext, 
 	}
 }
 
+function generateTokensForArray(arr: SemanticArray, context: SemanticContext, tokens: SemanticToken[]): void {
+	for (const item of arr.items) {
+		if (item == null) {
+			continue;
+		}
+		generateTokensForExpression(item, context, tokens);
+	}
+}
+
+function generateTokensForMap(map: SemanticMap, context: SemanticContext, tokens: SemanticToken[]): void {
+	for (const [k, v] of map.entries) {
+		if (k != null) {
+			generateTokensForExpression(k, context, tokens);
+		}
+		if (v != null) {
+			generateTokensForExpression(v, context, tokens);
+		}
+	}
+}
+
 function generateTokensForOp(op: SemanticOp, context: SemanticContext, tokens: SemanticToken[]) {
 	for (const expr of op.exprs) {
 		if (expr != null) {
@@ -531,6 +563,10 @@ function generateTokensForExpression(expr: SemanticExpression, context: Semantic
 		generateTokensForPostfix(expr as SemanticPostfix, context, tokens);
 	} else if (expr.ast.kind === 'TupleChainExpr') {
 		generateTokensForTuple(expr as SemanticTuple, context, tokens);
+	} else if (expr.ast.kind === 'ArrayExpr') {
+		generateTokensForArray(expr as SemanticArray, context, tokens);
+	} else if (expr.ast.kind === 'MapExpr') {
+		generateTokensForMap(expr as SemanticMap, context, tokens);
 	} else if (expr.ast.kind === 'NamedArgExpr') {
 		generateTokensForNamedArg(expr as SemanticNamedArg, context, tokens);
 	} else if (expr.ast.kind === 'ParensExpr') {
@@ -789,6 +825,24 @@ function processTuple(tuple: TupleChainExpr, context: SemanticContext): Semantic
 	};
 }
 
+function processArray(arr: ArrayExpr, context: SemanticContext): SemanticArray {
+	return {
+		ast: arr,
+		items: arr.values.map(v => processExpression(v, context))
+	};
+}
+
+function processMap(map: MapExpr, context: SemanticContext): SemanticMap {
+	const entries = new Map<SemanticExpression, SemanticExpression>();
+	for (const entry of map.entries) {
+		entries.set(processExpression(entry.key, context), processExpression(entry.value, context));
+	}
+	return {
+		ast: map,
+		entries: entries
+	};
+}
+
 function processOp(expr: OpExpr, context: SemanticContext): SemanticOp {
 	return {
 		ast: expr,
@@ -861,6 +915,10 @@ function processExpression(expr: Expression | NamedArgExpr, context: SemanticCon
 		return processPostfix(expr, context);
 	} else if (expr.kind === 'TupleChainExpr') {
 		return processTuple(expr, context);
+	} else if (expr.kind === 'ArrayExpr') {
+		return processArray(expr, context);
+	} else if (expr.kind === 'MapExpr') {
+		return processMap(expr, context);
 	} else if (expr.kind === 'NamedArgExpr') {
 		return processNamedArg(expr, context);
 	} else if (expr.kind === 'ParensExpr') {

@@ -1069,10 +1069,14 @@ ARRAY.setPattern(
 
 MAP_ENTRY.setPattern(
 	apply(
-		seq(
-			POSTFIX,
-			tok(TokenKind.SYMBOL_COLON),
-			POSTFIX
+		kmid(
+			opt_sc(tok(TokenKind.NEWLINE)),
+			seq(
+				POSTFIX,
+				tok(TokenKind.SYMBOL_COLON),
+				POSTFIX
+			),
+			opt_sc(tok(TokenKind.NEWLINE))
 		),
 		applyMapEntry
 	)
@@ -1082,6 +1086,7 @@ MAP.setPattern(
 	apply(
 		kmid(
 			seq(
+				opt_sc(tok(TokenKind.NEWLINE)),
 				tok(TokenKind.SYMBOL_LBRACE),
 				opt_sc(tok(TokenKind.NEWLINE))
 			),
@@ -1093,7 +1098,8 @@ MAP.setPattern(
 			),
 			seq(
 				opt_sc(tok(TokenKind.NEWLINE)),
-				tok(TokenKind.SYMBOL_RBRACE)
+				tok(TokenKind.SYMBOL_RBRACE),
+				opt_sc(tok(TokenKind.NEWLINE))
 			)
 		),
 		applyMap

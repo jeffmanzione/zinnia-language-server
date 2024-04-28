@@ -112,7 +112,7 @@ class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProv
 
 	private _encodeTokenType(tokenType: string): number {
 		if (tokenTypes.has(tokenType)) {
-			return tokenTypes.get(tokenType)!;
+			return tokenTypes.get(tokenType);
 		} else if (tokenType === 'notInLegend') {
 			return tokenTypes.size + 2;
 		}
@@ -124,7 +124,7 @@ class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProv
 		for (const element of strTokenModifiers) {
 			const tokenModifier = element;
 			if (tokenModifiers.has(tokenModifier)) {
-				result = result | (1 << tokenModifiers.get(tokenModifier)!);
+				result = result | (1 << tokenModifiers.get(tokenModifier));
 			} else if (tokenModifier === 'notInLegend') {
 				result = result | (1 << tokenModifiers.size + 2);
 			}
