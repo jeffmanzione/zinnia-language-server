@@ -19,10 +19,14 @@ import {
 	TransportKind
 } from 'vscode-languageclient/node';
 
-import { zinniaTokenizer } from './tokenizer';
-import { MODULE, } from './parser';
-import { expectEOF, expectSingleResult } from 'typescript-parsec';
-import { SemanticToken, generateSemanticTokens } from './semantic';
+
+interface SemanticToken {
+	text: string;
+	col: number;
+	row: number;
+	type: string;
+	modifiers: string[];
+}
 
 let client: LanguageClient;
 
@@ -99,10 +103,9 @@ export function deactivate(): Thenable<void> | undefined {
 	return client.stop();
 }
 
-
 class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProvider {
 	async provideDocumentSemanticTokens(document: TextDocument, token: CancellationToken): Promise<SemanticTokens> {
-		const allTokens = this._parseText(document.getText());
+		const allTokens = await this._parseText(document);
 		const builder = new SemanticTokensBuilder();
 		allTokens.forEach((token) => {
 			builder.push(token.row, token.col, token.text.length, this._encodeTokenType(token.type), this._encodeTokenModifiers(token.modifiers));
@@ -132,11 +135,19 @@ class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProv
 		return result;
 	}
 
-	private _parseText(text: string): SemanticToken[] {
-		const token = zinniaTokenizer.parse(text);
-		const parserOutput = MODULE.parse(token);
-		const output = expectSingleResult(expectEOF(parserOutput));
-		console.log(output);
-		return generateSemanticTokens(output);
+	private _parseText(document: TextDocument): Promise<SemanticToken[]> {
+		const tokens: Promise<SemanticToken[]> = client.sendRequest(
+			'textDocument/semanticTokens/full',
+			{ text: document.getText(), uri: document.uri.fsPath, version: document.version } satisfies DocParams
+		).then(tokens => {
+			return tokens;
+		}) as Promise<SemanticToken[]>;
+		return tokens;
 	}
+}
+
+interface DocParams {
+	text: string;
+	uri: string;
+	version: number
 }

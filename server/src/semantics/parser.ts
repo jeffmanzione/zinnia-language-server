@@ -69,7 +69,13 @@ function applyTuple(exprs: Expression[]): TupleExpr {
 	};
 }
 
-function applyArray(tupleExpr: TupleExpr): ArrayExpr {
+function applyArray(tupleExpr: TupleExpr | undefined): ArrayExpr {
+	if (tupleExpr == null) {
+		return {
+			kind: 'ArrayExpr',
+			values: []
+		};
+	}
 	const values =
 		tupleExpr.kind === 'TupleChainExpr'
 			? tupleExpr.values
@@ -89,10 +95,10 @@ function applyMapEntry(entry: [PostfixExpr, Token, PostfixExpr]): MapEntryExpr {
 	};
 }
 
-function applyMap(entries: [MapEntryExpr]): MapExpr {
+function applyMap(entries: MapEntryExpr[] | undefined): MapExpr {
 	return {
 		kind: 'MapExpr',
-		entries: entries
+		entries: entries ?? []
 	};
 }
 
@@ -179,7 +185,7 @@ function applyPostfix(
 	};
 }
 
-function applyRange(exprs: PostfixExpr[]): RangeExpr | PostfixExpr {
+function applyRange(exprs: [PostfixExpr, PostfixExpr | undefined, PostfixExpr | undefined]): RangeExpr | PostfixExpr {
 	if (exprs[1] === undefined) {
 		return exprs[0];
 	}
@@ -376,8 +382,8 @@ function applyIs(expr: [OrExpr, Token, OrExpr] | OrExpr): IsExpr | OrExpr {
 
 function applyCondition(
 	expr:
-		[Token, IsExpr | OrExpr, Token, ConditionExpr, Token, ConditionExpr] |
-		[Token, IsExpr | OrExpr, Token, ConditionExpr] |
+		[Token, IsExpr | OrExpr, Token | undefined, ConditionExpr, Token | undefined, ConditionExpr] |
+		[Token, IsExpr | OrExpr, Token | undefined, ConditionExpr] |
 		IsExpr | OrExpr
 ): ConditionExpr {
 	if ('kind' in expr) {
@@ -623,7 +629,7 @@ function applyJump(
 }
 
 function applyParam(
-	expr: [Token, IdentifierExpr, [Token, ConditionExpr]]
+	expr: [Token | undefined, IdentifierExpr, [Token, ConditionExpr] | undefined]
 ): ParamExpr {
 	const [field, name, defaultValExpr] = expr;
 	if (defaultValExpr !== undefined) {
@@ -645,8 +651,8 @@ function applyParam(
 
 function applyAnnotation(expr:
 	[
-		Token, IdentifierExpr, IdentifierExpr,
-		[Token, TupleExpr | NamedArgExpr[], Token]
+		Token, IdentifierExpr, IdentifierExpr | undefined,
+		[Token, TupleExpr | NamedArgExpr[], Token] | undefined
 	]
 ): AnnotationExpr {
 	const [at, firstPart, secondPart, thirdPart] = expr;
@@ -678,9 +684,9 @@ function applyAnnotation(expr:
 
 function applyFunction(
 	expr: [
-		AnnotationExpr[], Token, IdentifierExpr, Token,
+		AnnotationExpr[] | undefined, Token, IdentifierExpr, Token,
 		[Token, ParamExpr[], Token] | ParamExpr[],
-		Token, Token, Statement]
+		Token, Token | undefined, Statement]
 ): FunctionStat {
 	const [annots, defTok, name, lparen, paramsExpr, rparen, asyncTok, stat] = expr;
 	if (paramsExpr === undefined) {
@@ -728,10 +734,10 @@ function applyFunction(
 
 function applyMethod(
 	expr: [
-		AnnotationExpr[],
+		AnnotationExpr[] | undefined,
 		[Token, IdentifierExpr] | NewExpr, Token,
-		[Token, ParamExpr[], Token] | ParamExpr[],
-		Token, Token, Statement]
+		[Token, ParamExpr[], Token] | ParamExpr[] | undefined,
+		Token, Token | undefined, Statement]
 ): MethodStat {
 	const [annots, defExpr, lparen, paramsExpr, rparen, asyncTok, stat] = expr;
 	let methodTok, name;
@@ -739,8 +745,8 @@ function applyMethod(
 		methodTok = undefined;
 		name = defExpr;
 	} else {
-		methodTok = defExpr[0];
-		name = defExpr[1];
+		methodTok = (defExpr as [Token, IdentifierExpr])[0];
+		name = (defExpr as [Token, IdentifierExpr])[1];
 	}
 	if (paramsExpr === undefined) {
 		return {
@@ -786,19 +792,18 @@ function applyMethod(
 
 function applyAnon(
 	expr: [
-		Token, [Token, ParamExpr[], Token] | ParamExpr[],
-		Token, Token, [Token, AssignExpr] | CompoundStat]
+		Token, [Token, ParamExpr[], Token] | ParamExpr[] | undefined,
+		Token, Token | undefined, [Token, AssignExpr] | CompoundStat]
 ): AnonExpr {
 	const [lparen, paramsExpr, rparen, asyncTok, body] = expr;
 
 	let rhs: AssignExpr | CompoundStat;
-	let arrow: Token;
+	let arrow: Token | undefined;
 	if ('kind' in body && body.kind === 'CompoundStat') {
 		rhs = body;
-		arrow = undefined;
 	} else {
-		rhs = body[1];
-		arrow = body[0];
+		rhs = (body as [Token, AssignExpr])[1];
+		arrow = (body as [Token, AssignExpr])[0];
 	}
 	if (paramsExpr === undefined) {
 		return {
@@ -859,8 +864,8 @@ function applyStatic(
 }
 
 function applyClass(expr: [
-	AnnotationExpr[], Token, IdentifierExpr,
-	[Token, PostfixExpr],
+	AnnotationExpr[] | undefined, Token, IdentifierExpr,
+	[Token, PostfixExpr] | undefined,
 	[Token, ClassMemberStat[], Token] | ClassMemberStat
 ]): ClassStat {
 	const [annots, classTok, name, superExpr, body] = expr;

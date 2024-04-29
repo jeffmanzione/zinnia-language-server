@@ -108,7 +108,7 @@ export interface FunctionStat {
 
 export interface MethodStat {
 	kind: 'MethodStat';
-	methodTok: Token;
+	methodTok?: Token;
 	asyncTok?: Token;
 	lparen: Token;
 	rparen: Token;

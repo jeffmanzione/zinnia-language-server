@@ -22,6 +22,14 @@ import {
 import {
 	TextDocument
 } from 'vscode-languageserver-textdocument';
+import { SemanticAnalyzer } from './semantics/analyzer';
+
+
+export interface DocParams {
+	text: string;
+	uri: string;
+	version: number;
+}
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -135,6 +143,12 @@ documents.onDidClose(e => {
 	documentSettings.delete(e.document.uri);
 });
 
+const analyzer = new SemanticAnalyzer();
+
+connection.onRequest('textDocument/semanticTokens/full', async (params: DocParams) => {
+	console.log('onRequest');
+	return analyzer.fetchSemanticTokens(params);
+});
 
 connection.languages.diagnostics.on(async (params) => {
 	const document = documents.get(params.textDocument.uri);
@@ -156,6 +170,7 @@ connection.languages.diagnostics.on(async (params) => {
 // The content of a text document has changed. This event is emitted
 // when the text document first opened or when its content has changed.
 documents.onDidChangeContent(change => {
+	console.log('onDidChangeContent');
 	validateTextDocument(change.document);
 });
 

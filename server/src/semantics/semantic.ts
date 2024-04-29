@@ -306,7 +306,7 @@ type SemanticStatement =
 	| SemanticFunction
 	| SemanticExpression;
 
-interface SemanticModule {
+export interface SemanticModule {
 	ast: Module;
 	imports: SemanticImport[];
 	classes: SemanticClass[];
@@ -333,7 +333,7 @@ class Block {
 		}
 		const sid = new SemanticIdentifier(
 			typeof id === 'string'
-				? { kind: 'IdentifierExpr', token: null }
+				? { kind: 'IdentifierExpr' } as IdentifierExpr
 				: ('kind' in id && id.kind === 'NewExpr')
 					? { kind: 'IdentifierExpr', token: id.token }
 					: id,
@@ -344,19 +344,19 @@ class Block {
 		return sid;
 	}
 
-	findIdentifier(id: string): SemanticIdentifier {
+	findIdentifier(id: string): SemanticIdentifier | undefined {
 		if (this.members.has(id)) {
 			return this.members.get(id);
 		}
 		if (this.parent != null) {
 			return this.parent.findIdentifier(id);
 		}
-		return null;
+		return undefined;
 	}
 }
 
 class SemanticContext {
-	module: SemanticModule;
+	module?: SemanticModule;
 	block: Block;
 
 	constructor(block: Block = new Block()) {
@@ -369,7 +369,7 @@ class SemanticContext {
 
 	newBlock(): SemanticContext {
 		const copy = new SemanticContext(new Block(this.block));
-		copy.setModule(this.module);
+		copy.setModule(this.module!);
 		return copy;
 	}
 }
@@ -412,7 +412,7 @@ function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticCo
 		tokens.push(
 			createToken(
 				tok,
-				tok.next.kind === TokenKind.SYMBOL_LPAREN && id.type != 'method'
+				tok.next!.kind === TokenKind.SYMBOL_LPAREN && id.type != 'method'
 					? 'function'
 					: id.type,
 				modifiers)
@@ -450,7 +450,7 @@ function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticConte
 		}
 		if ('nextToken' in nestedExpr) {
 			const tok = nestedExpr as Token;
-			tokens.push(createToken(tok, tok.next.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property'));
+			tokens.push(createToken(tok, tok.next!.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property'));
 		} else {
 			generateTokensForExpression(nestedExpr as SemanticExpression, context, tokens);
 		}
@@ -541,7 +541,7 @@ function generateTokensForAnon(anon: SemanticAnon, context: SemanticContext, tok
 	for (const param of anon.params) {
 		generateTokensForIdentifier(param.name, context, tokens);
 		if (param.isField) {
-			tokens.push(createToken(param.ast.field, 'keyword'));
+			tokens.push(createToken(param.ast.field!, 'keyword'));
 		}
 	}
 	generateTokensForStatement(anon.stat, context, tokens);
@@ -628,7 +628,7 @@ function generateTokensForMethod(meth: SemanticMethod, context: SemanticContext,
 	for (const param of meth.params) {
 		generateTokensForIdentifier(param.name, context, tokens);
 		if (param.isField) {
-			tokens.push(createToken(param.ast.field, 'keyword'));
+			tokens.push(createToken(param.ast.field!, 'keyword'));
 		}
 	}
 	generateTokensForStatement(meth.stat, context, tokens);
@@ -662,7 +662,7 @@ function generateTokensForClass(cls: SemanticClass, context: SemanticContext, to
 	for (const field of cls.fields) {
 		tokens.push(createToken(field.token, 'property'));
 		if (field.ast.kind === 'ParamExpr') {
-			tokens.push(createToken(field.ast.field, 'keyword'));
+			tokens.push(createToken(field.ast.field!, 'keyword'));
 		}
 	}
 	for (const [_, meth] of cls.methods) {
@@ -686,7 +686,7 @@ function generateTokensForFunction(func: SemanticFunction, context: SemanticCont
 	for (const param of func.params) {
 		generateTokensForIdentifier(param.name, context, tokens);
 		if (param.isField) {
-			tokens.push(createToken(param.ast.field, 'keyword'));
+			tokens.push(createToken(param.ast.field!, 'keyword'));
 		}
 	}
 	generateTokensForStatement(func.stat, context, tokens);
@@ -695,51 +695,53 @@ function generateTokensForFunction(func: SemanticFunction, context: SemanticCont
 function generateTokensForStatement(stat: SemanticStatement, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (stat === undefined) {
 		return;
-	} else if (stat.ast.kind === 'CompoundStat') {
+	}
+	const ast = stat.ast!;
+	if (ast.kind === 'CompoundStat') {
 		const compoundStat = stat as SemanticCompound;
 		for (const sstat of compoundStat.stats) {
 			generateTokensForStatement(sstat, context, tokens);
 		}
-	} else if (stat.ast.kind === 'SelectStat') {
+	} else if (ast.kind === 'SelectStat') {
 		const selectStat = stat as SemanticSelect;
-		tokens.push(createToken(stat.ast.ifTok, 'keyword'));
+		tokens.push(createToken(ast.ifTok, 'keyword'));
 		generateTokensForStatement(selectStat.cond, context, tokens);
 		generateTokensForStatement(selectStat.ifTrue, context, tokens);
 		if (selectStat.ifFalse != null) {
-			tokens.push(createToken(stat.ast.elseTok, 'keyword'));
+			tokens.push(createToken(ast.elseTok!, 'keyword'));
 			generateTokensForStatement(selectStat.ifFalse, context, tokens);
 		}
-	} else if (stat.ast.kind === 'ForStat') {
-		tokens.push(createToken(stat.ast.forTok, 'keyword'));
+	} else if (ast.kind === 'ForStat') {
+		tokens.push(createToken(ast.forTok, 'keyword'));
 		generateTokensForExpression((stat as SemanticFor).first, context, tokens);
 		generateTokensForExpression((stat as SemanticFor).second, context, tokens);
 		generateTokensForExpression((stat as SemanticFor).third, context, tokens);
 		generateTokensForStatement((stat as SemanticFor).body, context, tokens);
-	} else if (stat.ast.kind === 'ForeachStat') {
-		tokens.push(createToken(stat.ast.forTok, 'keyword'));
-		tokens.push(createToken(stat.ast.inTok, 'keyword'));
+	} else if (ast.kind === 'ForeachStat') {
+		tokens.push(createToken(ast.forTok, 'keyword'));
+		tokens.push(createToken(ast.inTok, 'keyword'));
 		generateTokensForAssignLhs((stat as SemanticForeach).lhs, context, tokens);
 		generateTokensForExpression((stat as SemanticForeach).rhs, context, tokens);
 		generateTokensForStatement((stat as SemanticForeach).body, context, tokens);
-	} else if (stat.ast.kind === 'WhileStat') {
-		tokens.push(createToken(stat.ast.whileTok, 'keyword'));
+	} else if (ast.kind === 'WhileStat') {
+		tokens.push(createToken(ast.whileTok, 'keyword'));
 		generateTokensForExpression((stat as SemanticWhile).cond, context, tokens);
 		generateTokensForStatement((stat as SemanticWhile).body, context, tokens);
-	} else if (stat.ast.kind === 'JumpStat') {
-		tokens.push(createToken(stat.ast.token, 'keyword'));
+	} else if (ast.kind === 'JumpStat') {
+		tokens.push(createToken(ast.token, 'keyword'));
 		if ((stat as SemanticJump).expr != null) {
-			generateTokensForExpression((stat as SemanticJump).expr, context, tokens);
+			generateTokensForExpression((stat as SemanticJump).expr!, context, tokens);
 		}
-	} else if (stat.ast.kind === 'TryStat') {
-		tokens.push(createToken(stat.ast.tryTok, 'keyword'));
-		tokens.push(createToken(stat.ast.catchTok, 'keyword'));
+	} else if (ast.kind === 'TryStat') {
+		tokens.push(createToken(ast.tryTok, 'keyword'));
+		tokens.push(createToken(ast.catchTok, 'keyword'));
 		generateTokensForStatement((stat as SemanticTry).tryStat, context, tokens);
 		generateTokensForAssignLhs((stat as SemanticTry).catchAssign, context, tokens);
 		generateTokensForStatement((stat as SemanticTry).catchStat, context, tokens);
-	} else if (stat.ast.kind === 'RaiseStat') {
-		tokens.push(createToken(stat.ast.raise, 'keyword'));
+	} else if (ast.kind === 'RaiseStat') {
+		tokens.push(createToken(ast.raise, 'keyword'));
 		generateTokensForExpression((stat as SemanticRaise).expr, context, tokens);
-	} else if (stat.ast.kind === 'FunctionStat') {
+	} else if (ast.kind === 'FunctionStat') {
 		generateTokensForFunction((stat as SemanticFunction), context, tokens);
 	} else {
 		generateTokensForExpression(stat as SemanticExpression, context, tokens);
@@ -871,7 +873,7 @@ function processCondition(expr: ConditionBaseExpr, context: SemanticContext): Se
 		ast: expr,
 		cond: processExpression(expr.condition, context),
 		ifTrue: processExpression(expr.ifTrue, context),
-		ifFalse: expr.ifFalse != null ? processExpression(expr.ifFalse, context) : null
+		ifFalse: expr.ifFalse != null ? processExpression(expr.ifFalse, context) : undefined
 	};
 }
 
@@ -881,7 +883,7 @@ function processRange(expr: RangeExpr, context: SemanticContext): SemanticRange 
 		ast: expr,
 		start: processExpression(expr.start, context),
 		end: processExpression(expr.end, context),
-		inc: expr.inc != null ? processExpression(expr.inc, context) : null
+		inc: expr.inc != null ? processExpression(expr.inc, context) : undefined
 	};
 }
 
@@ -939,6 +941,7 @@ function processExpression(expr: Expression | NamedArgExpr, context: SemanticCon
 	} else if (isOpExpr(expr)) {
 		return processOp(expr as OpExpr, context);
 	}
+	// @ts-expect-error Okay
 	return undefined;
 }
 
@@ -1019,7 +1022,7 @@ function processStatement(stat: Statement, context: SemanticContext): SemanticSt
 			ast: stat,
 			cond: processStatement(stat.cond, context),
 			ifTrue: processStatement(stat.ifTrue, context.newBlock()),
-			ifFalse: stat.elseTok != null ? processStatement(stat.ifFalse, context.newBlock()) : undefined
+			ifFalse: stat.elseTok != null ? processStatement(stat.ifFalse!, context.newBlock()) : undefined
 		};
 	} else if (stat.kind === 'WhileStat') {
 		const newContext = context.newBlock();
@@ -1049,7 +1052,7 @@ function processStatement(stat: Statement, context: SemanticContext): SemanticSt
 	} else if (stat.kind === 'JumpStat') {
 		return {
 			ast: stat,
-			expr: stat.expr == null ? null : processExpression(stat.expr, context)
+			expr: stat.expr == null ? undefined : processExpression(stat.expr, context)
 		};
 	} else if (stat.kind === 'TryStat') {
 		const tryContext = context.newBlock();
@@ -1154,7 +1157,7 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 
 	let fields: SemanticField[] = [];
 	const name = processIdentifier(stat.name, context, 'class', []);
-	const sup = stat.super != null ? processExpression(stat.super, context) : null;
+	const sup = stat.super != null ? processExpression(stat.super, context) : undefined;
 	const statics = new Map<string, SemanticStatic>;
 	const methods = new Map<string, SemanticMethod>;
 	for (const classStat of stat.stats) {
@@ -1162,7 +1165,7 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 			fields = fields.concat(processFields(classStat, context));
 		} else if (classStat.kind === 'StaticStat') {
 			const sttc = processStatic(classStat, context);
-			statics.set(sttc.name.ast.token.text, sttc);
+			statics.set(sttc.name.ast!.token.text, sttc);
 		} else {
 			processIdentifier(classStat.name, context, 'method');
 		}
@@ -1224,10 +1227,10 @@ function processModule(module: Module, context: SemanticContext): SemanticModule
 	return semanticModule;
 }
 
-export function generateSemanticTokens(module: Module): SemanticToken[] {
+export function generateSemanticTokens(module: Module): [SemanticModule, SemanticToken[]] {
 	const context = new SemanticContext();
 	const tokens: SemanticToken[] = [];
 	const semanticModule = processModule(module, context);
 	generatTokensForModule(semanticModule, context, tokens);
-	return tokens;
+	return [semanticModule, tokens];
 }
