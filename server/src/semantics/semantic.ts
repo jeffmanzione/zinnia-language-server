@@ -345,7 +345,11 @@ class Block {
 	}
 
 	findIdentifier(id: string): SemanticIdentifier | undefined {
+
 		if (this.members.has(id)) {
+			if (id === '_ClientConnection') {
+				console.log(this.members.get(id));
+			}
 			return this.members.get(id);
 		}
 		if (this.parent != null) {
@@ -397,6 +401,13 @@ function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, 
 	generateTokensForExpression(unary.rhs, context, tokens);
 }
 
+function selectIdType(id: SemanticIdentifier, token: Token): IdType {
+	if (id.type === 'class' || id.type === 'method' || token.next?.kind !== TokenKind.SYMBOL_LPAREN) {
+		return id.type;
+	}
+	return 'function';
+}
+
 function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticContext, tokens: SemanticToken[]): void {
 	if (id == null || id.hasGenerated()) {
 		return;
@@ -412,9 +423,7 @@ function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticCo
 		tokens.push(
 			createToken(
 				tok,
-				tok.next!.kind === TokenKind.SYMBOL_LPAREN && id.type != 'method'
-					? 'function'
-					: id.type,
+				selectIdType(id, tok),
 				modifiers)
 		);
 	}

@@ -1,4 +1,3 @@
-import { TextDocument } from 'vscode-languageserver-textdocument';
 import { SemanticModule, SemanticToken, generateSemanticTokens } from './semantic';
 import { zinniaTokenizer } from './tokenizer';
 import { MODULE } from './parser';

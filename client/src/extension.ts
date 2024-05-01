@@ -136,13 +136,10 @@ class ZinniaDocumentSemanticTokensProvider implements DocumentSemanticTokensProv
 	}
 
 	private _parseText(document: TextDocument): Promise<SemanticToken[]> {
-		const tokens: Promise<SemanticToken[]> = client.sendRequest(
+		return client.sendRequest(
 			'textDocument/semanticTokens/full',
 			{ text: document.getText(), uri: document.uri.fsPath, version: document.version } satisfies DocParams
-		).then(tokens => {
-			return tokens;
-		}) as Promise<SemanticToken[]>;
-		return tokens;
+		);
 	}
 }
 
