@@ -2,7 +2,7 @@ import * as parsec from 'typescript-parsec';
 import { alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, rep_sc, rule, seq, tok } from 'typescript-parsec';
 import { TokenKind } from './tokenizer';
 import { ArrayExpr, ArrayIndexExpr, BoolExpr, ConstantExpr, EmptyParensExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, IntExpr, MapEntryExpr, MapExpr, MemberAccessExpr, NamedArgExpr, NewExpr, ParamExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, StringExpr, TupleExpr, UnaryExpr, isPrimaryExpr, BinaryExpr, MultExpr, AddExpr, InExpr, RelationExpr, EqualExpr, AndExpr, OrExpr, IsExpr, ConditionExpr, AssignExpr, AssignTupleExpr, AssignArrayExpr, AssignLhsExpr, TupleChainExpr, ParensExpr, AnonExpr, AnnotationExpr, NoneExpr } from './expressions';
-import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat, FunctionStat, MethodStat, FieldStat, StaticStat, ClassStat, ClassMemberStat } from './statements';
+import { Statement, Module, ImportStat, ForeachStat, ForStat, WhileStat, IterStat, CompoundStat, SelectStat, ExitStat, RaiseStat, TryStat, JumpStat, FunctionStat, MethodStat, FieldStat, StaticStat, ClassStat, ClassMemberStat, SpecialMethodIdentifierExpr } from './statements';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -28,19 +28,19 @@ function applyBool(value: Token): BoolExpr {
 	};
 }
 
-function applyInt(value: Token): IntExpr {
+function applyInt(value: [Token | undefined, Token]): IntExpr {
 	return {
 		kind: 'IntExpr',
-		token: value,
-		value: Number(value.text)
+		tokens: value[0] !== undefined ? [value[0], value[1]] : [value[1]],
+		value: Number(value[0] !== undefined ? '-' + value[1].text : value[1].text)
 	};
 }
 
-function applyFloat(value: Token): FloatExpr {
+function applyFloat(value: [Token | undefined, Token]): FloatExpr {
 	return {
 		kind: 'FloatExpr',
-		token: value,
-		value: Number(value.text)
+		tokens: value[0] !== undefined ? [value[0], value[1]] : [value[1]],
+		value: Number(value[0] !== undefined ? '-' + value[1].text : value[1].text)
 	};
 }
 
@@ -69,8 +69,8 @@ function applyTuple(exprs: Expression[]): TupleExpr {
 	};
 }
 
-function applyArray(tupleExpr: TupleExpr | undefined): ArrayExpr {
-	if (tupleExpr == null) {
+function applyArray(tupleExpr: Token | TupleExpr | undefined): ArrayExpr {
+	if (tupleExpr == null || tupleExpr.kind === TokenKind.SYMBOL_ARRAY_ACCESS) {
 		return {
 			kind: 'ArrayExpr',
 			values: []
@@ -82,7 +82,7 @@ function applyArray(tupleExpr: TupleExpr | undefined): ArrayExpr {
 			: [tupleExpr];
 	return {
 		kind: 'ArrayExpr',
-		values: values
+		values: values as TupleExpr[]
 	};
 }
 
@@ -685,7 +685,7 @@ function applyAnnotation(expr:
 function applyFunction(
 	expr: [
 		AnnotationExpr[] | undefined, Token, IdentifierExpr, Token,
-		[Token, ParamExpr[], Token] | ParamExpr[],
+		[Token, ParamExpr[], Token] | ParamExpr[] | undefined,
 		Token, Token | undefined, Statement]
 ): FunctionStat {
 	const [annots, defTok, name, lparen, paramsExpr, rparen, asyncTok, stat] = expr;
@@ -732,10 +732,19 @@ function applyFunction(
 	};
 }
 
+function applySpecialMethodIdentifier(
+	expr: Token
+): SpecialMethodIdentifierExpr {
+	return {
+		kind: 'SpecialMethodIdentifierExpr',
+		token: expr
+	};
+}
+
 function applyMethod(
 	expr: [
 		AnnotationExpr[] | undefined,
-		[Token, IdentifierExpr] | NewExpr, Token,
+		[Token, IdentifierExpr | SpecialMethodIdentifierExpr] | NewExpr, Token,
 		[Token, ParamExpr[], Token] | ParamExpr[] | undefined,
 		Token, Token | undefined, Statement]
 ): MethodStat {
@@ -745,8 +754,8 @@ function applyMethod(
 		methodTok = undefined;
 		name = defExpr;
 	} else {
-		methodTok = (defExpr as [Token, IdentifierExpr])[0];
-		name = (defExpr as [Token, IdentifierExpr])[1];
+		methodTok = (defExpr as Array<any>)[0];
+		name = (defExpr as Array<any>)[1];
 	}
 	if (paramsExpr === undefined) {
 		return {
@@ -769,7 +778,7 @@ function applyMethod(
 			name: name,
 			lparen: lparen,
 			rparen: rparen,
-			params: params as ParamExpr[],
+			params: params,
 			isNamed: true,
 			asyncTok: asyncTok,
 			stat: stat,
@@ -791,54 +800,69 @@ function applyMethod(
 }
 
 function applyAnon(
-	expr: [
-		Token, [Token, ParamExpr[], Token] | ParamExpr[] | undefined,
-		Token, Token | undefined, [Token, AssignExpr] | CompoundStat]
+	expr:
+		[IdentifierExpr, Token | undefined, Token, AssignExpr] |
+		[
+			Token, [Token, ParamExpr[], Token] | ParamExpr[] | undefined,
+			Token, Token | undefined, [Token, AssignExpr] | CompoundStat
+		]
 ): AnonExpr {
-	const [lparen, paramsExpr, rparen, asyncTok, body] = expr;
-
-	let rhs: AssignExpr | CompoundStat;
-	let arrow: Token | undefined;
-	if ('kind' in body && body.kind === 'CompoundStat') {
-		rhs = body;
+	if (expr.length == 4) {
+		const [identifier, asyncToc, arrowTok, body] = expr;
+		return {
+			kind: 'AnonExpr',
+			params: [{ kind: 'ParamExpr', name: identifier }],
+			asyncTok: asyncToc,
+			isNamed: false,
+			arrow: arrowTok,
+			expr: body
+		};
 	} else {
-		rhs = (body as [Token, AssignExpr])[1];
-		arrow = (body as [Token, AssignExpr])[0];
-	}
-	if (paramsExpr === undefined) {
+		const [lparen, paramsExpr, rparen, asyncTok, body] = expr;
+
+		let rhs: AssignExpr | CompoundStat;
+		let arrow: Token | undefined;
+		if ('kind' in body && body.kind === 'CompoundStat') {
+			rhs = body;
+		} else {
+			rhs = (body as [Token, AssignExpr])[1];
+			arrow = (body as [Token, AssignExpr])[0];
+		}
+		if (paramsExpr === undefined) {
+			return {
+				kind: 'AnonExpr',
+				lparen: lparen,
+				rparen: rparen,
+				params: [],
+				isNamed: true,
+				asyncTok: asyncTok,
+				arrow: arrow,
+				expr: rhs
+			};
+		} else if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
+			const [_, params, __] = paramsExpr;
+			return {
+				kind: 'AnonExpr',
+				lparen: lparen,
+				rparen: rparen,
+				params: params,
+				isNamed: true,
+				asyncTok: asyncTok,
+				arrow: arrow,
+				expr: rhs
+			};
+		}
 		return {
 			kind: 'AnonExpr',
 			lparen: lparen,
 			rparen: rparen,
-			params: [],
-			isNamed: true,
-			asyncTok: asyncTok,
-			arrow: arrow,
-			expr: rhs
-		};
-	} else if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
-		const [_, params, __] = paramsExpr;
-		return {
-			kind: 'AnonExpr',
-			lparen: lparen,
-			rparen: rparen,
-			params: params,
-			isNamed: true,
+			params: paramsExpr as ParamExpr[],
+			isNamed: false,
 			asyncTok: asyncTok,
 			arrow: arrow,
 			expr: rhs
 		};
 	}
-	return {
-		kind: 'AnonExpr',
-		lparen: lparen,
-		rparen: rparen,
-		params: paramsExpr as ParamExpr[],
-		isNamed: false,
-		asyncTok: asyncTok,
-		arrow: arrow,
-		expr: rhs
-	};
 }
 
 function applyField(expr: [Token, IdentifierExpr[]]): FieldStat {
@@ -931,6 +955,7 @@ function applyModule(value: Statement[]): Module {
 // Expressions
 
 export const EXPRESSION = rule<TokenKind, Expression>();
+export const LINES = rule<TokenKind, Token[] | undefined>();
 
 // Literals and identifiers
 export const IDENTIFIER = rule<TokenKind, IdentifierExpr>();
@@ -995,6 +1020,7 @@ export const RAISE = rule<TokenKind, RaiseStat>();
 export const TRY = rule<TokenKind, TryStat>();
 export const JUMP = rule<TokenKind, JumpStat>();
 
+export const SPECIAL_METHOD_IDENTIFIER = rule<TokenKind, SpecialMethodIdentifierExpr>();
 export const FUNCTION = rule<TokenKind, FunctionStat>();
 export const PARAM = rule<TokenKind, ParamExpr>();
 export const ANON = rule<TokenKind, AnonExpr>();
@@ -1008,6 +1034,12 @@ export const STATIC = rule<TokenKind, StaticStat>();
 export const IMPORT = rule<TokenKind, ImportStat>();
 
 export const MODULE = rule<TokenKind, Module>();
+
+LINES.setPattern(
+	rep_sc(
+		tok(TokenKind.NEWLINE)
+	)
+);
 
 IDENTIFIER.setPattern(
 	apply(
@@ -1044,12 +1076,18 @@ CONSTANT.setPattern(
 			applyNone,
 		),
 		apply(
-			tok(TokenKind.LITEARL_INTEGER),
-			applyInt
+			seq(
+				opt_sc(tok(TokenKind.SYMBOL_MINUS)),
+				tok(TokenKind.LITEARL_FLOAT)
+			),
+			applyFloat
 		),
 		apply(
-			tok(TokenKind.LITEARL_FLOAT),
-			applyFloat
+			seq(
+				opt_sc(tok(TokenKind.SYMBOL_MINUS)),
+				tok(TokenKind.LITEARL_INTEGER)
+			),
+			applyInt
 		)
 	)
 );
@@ -1063,10 +1101,13 @@ STRING.setPattern(
 
 ARRAY.setPattern(
 	apply(
-		kmid(
-			tok(TokenKind.SYMBOL_LBRACKET),
-			opt_sc(TUPLE),
-			tok(TokenKind.SYMBOL_RBRACKET)
+		alt_sc(
+			tok(TokenKind.SYMBOL_ARRAY_ACCESS),
+			kmid(
+				tok(TokenKind.SYMBOL_LBRACKET),
+				opt_sc(TUPLE),
+				tok(TokenKind.SYMBOL_RBRACKET)
+			)
 		),
 		applyArray
 	)
@@ -1075,13 +1116,13 @@ ARRAY.setPattern(
 MAP_ENTRY.setPattern(
 	apply(
 		kmid(
-			opt_sc(tok(TokenKind.NEWLINE)),
+			LINES,
 			seq(
 				POSTFIX,
 				tok(TokenKind.SYMBOL_COLON),
 				POSTFIX
 			),
-			opt_sc(tok(TokenKind.NEWLINE))
+			LINES
 		),
 		applyMapEntry
 	)
@@ -1091,9 +1132,9 @@ MAP.setPattern(
 	apply(
 		kmid(
 			seq(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				tok(TokenKind.SYMBOL_LBRACE),
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			),
 			opt_sc(
 				list_sc(
@@ -1102,9 +1143,9 @@ MAP.setPattern(
 				)
 			),
 			seq(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				tok(TokenKind.SYMBOL_RBRACE),
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			)
 		),
 		applyMap
@@ -1160,15 +1201,15 @@ NAMED_ARG.setPattern(
 	apply(
 		seq(
 			kmid(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				IDENTIFIER,
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			),
 			tok(TokenKind.SYMBOL_COLON),
 			kmid(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				CONDITION,
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			),
 		),
 		applyNamedArg
@@ -1226,12 +1267,12 @@ POSTFIX.setPattern(
 							EMPTY_PARENS,
 							FUNCTION_CALL,
 							kright(
-								opt_sc(tok(TokenKind.NEWLINE)),
+								LINES,
 								MEMBER_ACCESS
 							)
 						)
 					),
-					opt_sc(tok(TokenKind.NEWLINE))
+					LINES
 				)
 			),
 			PRIMARY
@@ -1534,9 +1575,9 @@ TUPLE.setPattern(
 	apply(
 		list_sc(
 			kmid(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				ASSIGN,
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			),
 			tok(TokenKind.SYMBOL_COMMA)),
 		applyTuple
@@ -1546,7 +1587,7 @@ TUPLE.setPattern(
 EXPRESSION.setPattern(
 	kleft(
 		TUPLE,
-		opt_sc(tok(TokenKind.NEWLINE))
+		LINES
 	)
 );
 
@@ -1634,15 +1675,15 @@ COMPOUND.setPattern(
 	apply(
 		seq(
 			kmid(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				tok(TokenKind.SYMBOL_LBRACE),
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			),
 			rep_sc(STATEMENT),
 			kmid(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				tok(TokenKind.SYMBOL_RBRACE),
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			)
 		),
 		applyCompound
@@ -1709,7 +1750,7 @@ TRY.setPattern(
 JUMP.setPattern(
 	apply(
 		kmid(
-			opt_sc(tok(TokenKind.NEWLINE)),
+			LINES,
 			alt_sc(
 				seq(
 					tok(TokenKind.KEYWORD_RETURN),
@@ -1726,7 +1767,7 @@ JUMP.setPattern(
 				tok(TokenKind.KEYWORD_BREAK),
 				tok(TokenKind.KEYWORD_CONTINUE)
 			),
-			opt_sc(tok(TokenKind.NEWLINE))
+			LINES
 		),
 		applyJump
 	)
@@ -1735,7 +1776,7 @@ JUMP.setPattern(
 PARAM.setPattern(
 	apply(
 		kmid(
-			opt_sc(tok(TokenKind.NEWLINE)),
+			LINES,
 			seq(
 				opt_sc(tok(TokenKind.KEYWORD_FIELD)),
 				IDENTIFIER,
@@ -1746,7 +1787,7 @@ PARAM.setPattern(
 					)
 				)
 			),
-			opt_sc(tok(TokenKind.NEWLINE))
+			LINES
 		),
 		applyParam
 	)
@@ -1755,7 +1796,7 @@ PARAM.setPattern(
 ANNOTATION.setPattern(
 	apply(
 		kmid(
-			opt_sc(tok(TokenKind.NEWLINE)),
+			LINES,
 			seq(
 				tok(TokenKind.SYMBOL_AT),
 				IDENTIFIER,
@@ -1776,7 +1817,7 @@ ANNOTATION.setPattern(
 					)
 				)
 			),
-			opt_sc(tok(TokenKind.NEWLINE))
+			LINES
 		),
 		applyAnnotation
 	)
@@ -1798,13 +1839,26 @@ FUNCTION.setPattern(
 					list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
 					tok(TokenKind.SYMBOL_RBRACE)
 				),
-				list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA))
+				list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+				nil()
 			),
 			tok(TokenKind.SYMBOL_RPAREN),
 			opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
 			STATEMENT
 		),
 		applyFunction
+	)
+);
+
+SPECIAL_METHOD_IDENTIFIER.setPattern(
+	apply(
+		alt_sc(
+			tok(TokenKind.SYMBOL_EQUIV),
+			tok(TokenKind.SYMBOL_NEQUIV),
+			tok(TokenKind.SYMBOL_ARRAY_SET),
+			tok(TokenKind.SYMBOL_ARRAY_ACCESS)
+		),
+		applySpecialMethodIdentifier
 	)
 );
 
@@ -1815,7 +1869,10 @@ METHOD.setPattern(
 			alt_sc(
 				seq(
 					tok(TokenKind.KEYWORD_METHOD),
-					IDENTIFIER
+					alt_sc(
+						IDENTIFIER,
+						SPECIAL_METHOD_IDENTIFIER
+					)
 				),
 				NEW
 			),
@@ -1839,26 +1896,34 @@ METHOD.setPattern(
 
 ANON.setPattern(
 	apply(
-		seq(
-			tok(TokenKind.SYMBOL_LPAREN),
-			alt_sc(
-				seq(
-					tok(TokenKind.SYMBOL_LBRACE),
-					list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
-					tok(TokenKind.SYMBOL_RBRACE)
-				),
-				list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
-				nil()
+		alt_sc(
+			seq(
+				IDENTIFIER,
+				opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
+				tok(TokenKind.SYMBOL_RARROW),
+				ASSIGN
 			),
-			tok(TokenKind.SYMBOL_RPAREN),
-			opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
-			alt_sc(
-				seq(
-					tok(TokenKind.SYMBOL_RARROW),
-					ASSIGN
+			seq(
+				tok(TokenKind.SYMBOL_LPAREN),
+				alt_sc(
+					seq(
+						tok(TokenKind.SYMBOL_LBRACE),
+						list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+						tok(TokenKind.SYMBOL_RBRACE)
+					),
+					list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
+					nil()
 				),
-				COMPOUND
-			)
+				tok(TokenKind.SYMBOL_RPAREN),
+				opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
+				alt_sc(
+					seq(
+						tok(TokenKind.SYMBOL_RARROW),
+						ASSIGN
+					),
+					COMPOUND
+				),
+			),
 		),
 		applyAnon
 	)
@@ -1901,35 +1966,35 @@ CLASS.setPattern(
 			alt_sc(
 				seq(
 					kmid(
-						opt_sc(tok(TokenKind.NEWLINE)),
+						LINES,
 						tok(TokenKind.SYMBOL_LBRACE),
-						opt_sc(tok(TokenKind.NEWLINE))
+						LINES
 					),
 					rep_sc(
 						kmid(
-							opt_sc(tok(TokenKind.NEWLINE)),
+							LINES,
 							alt_sc(
 								METHOD,
 								FIELD,
 								STATIC
 							),
-							opt_sc(tok(TokenKind.NEWLINE))
+							LINES
 						)
 					),
 					kmid(
-						opt_sc(tok(TokenKind.NEWLINE)),
+						LINES,
 						tok(TokenKind.SYMBOL_RBRACE),
-						opt_sc(tok(TokenKind.NEWLINE))
+						LINES
 					),
 				),
 				kmid(
-					opt_sc(tok(TokenKind.NEWLINE)),
+					LINES,
 					alt_sc(
 						METHOD,
 						FIELD,
 						STATIC
 					),
-					opt_sc(tok(TokenKind.NEWLINE))
+					LINES
 				)
 			)
 		),
@@ -1963,7 +2028,7 @@ IMPORT.setPattern(
 
 STATEMENT.setPattern(
 	kmid(
-		opt_sc(tok(TokenKind.NEWLINE)),
+		LINES,
 		alt_sc(
 			EXIT,
 			RAISE,
@@ -1974,7 +2039,7 @@ STATEMENT.setPattern(
 			JUMP,
 			EXPRESSION
 		),
-		opt_sc(tok(TokenKind.NEWLINE))
+		LINES
 	),
 );
 
@@ -1982,7 +2047,7 @@ MODULE.setPattern(
 	apply(
 		rep_sc(
 			kmid(
-				opt_sc(tok(TokenKind.NEWLINE)),
+				LINES,
 				alt_sc(
 					IMPORT,
 					CLASS,
@@ -1995,7 +2060,7 @@ MODULE.setPattern(
 					ITER,
 					EXPRESSION
 				),
-				opt_sc(tok(TokenKind.NEWLINE))
+				LINES
 			)
 		),
 		applyModule

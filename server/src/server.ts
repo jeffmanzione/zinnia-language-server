@@ -23,13 +23,9 @@ import {
 	TextDocument
 } from 'vscode-languageserver-textdocument';
 import { SemanticAnalyzer } from './semantics/analyzer';
+import { DocParams } from './interfaces';
 
-
-export interface DocParams {
-	text: string;
-	uri: string;
-	version: number;
-}
+const analyzer = new SemanticAnalyzer();
 
 // Create a connection for the server, using Node's IPC as a transport.
 // Also include all preview / proposed LSP features.
@@ -47,17 +43,11 @@ connection.onInitialize((params: InitializeParams) => {
 
 	// Does the client support the `workspace/configuration` request?
 	// If not, we fall back using global settings.
-	hasConfigurationCapability = !!(
-		capabilities.workspace && !!capabilities.workspace.configuration
-	);
-	hasWorkspaceFolderCapability = !!(
-		capabilities.workspace && !!capabilities.workspace.workspaceFolders
-	);
-	hasDiagnosticRelatedInformationCapability = !!(
-		capabilities.textDocument &&
-		capabilities.textDocument.publishDiagnostics &&
-		capabilities.textDocument.publishDiagnostics.relatedInformation
-	);
+	hasConfigurationCapability = capabilities.workspace?.configuration ?? false;
+	hasWorkspaceFolderCapability = capabilities.workspace?.workspaceFolders ?? false;
+	analyzer.init(params.workspaceFolders ?? []);
+	hasDiagnosticRelatedInformationCapability =
+		capabilities.textDocument?.publishDiagnostics?.relatedInformation ?? false;
 
 	const result: InitializeResult = {
 		capabilities: {
@@ -88,7 +78,7 @@ connection.onInitialized(() => {
 		connection.client.register(DidChangeConfigurationNotification.type, undefined);
 	}
 	if (hasWorkspaceFolderCapability) {
-		connection.workspace.onDidChangeWorkspaceFolders(_event => {
+		connection.workspace.onDidChangeWorkspaceFolders(_ => {
 			connection.console.log('Workspace folder change event received.');
 		});
 	}
@@ -143,12 +133,10 @@ documents.onDidClose(e => {
 	documentSettings.delete(e.document.uri);
 });
 
-const analyzer = new SemanticAnalyzer();
-
-connection.onRequest('textDocument/semanticTokens/full', async (params: DocParams) => {
-	console.log('onRequest');
-	return analyzer.fetchSemanticTokens(params);
-});
+connection.onRequest(
+	'textDocument/semanticTokens/full',
+	async (params: DocParams) => analyzer.parseDocument(params).tokens
+);
 
 connection.languages.diagnostics.on(async (params) => {
 	const document = documents.get(params.textDocument.uri);
@@ -185,7 +173,7 @@ async function validateTextDocument(textDocument: TextDocument): Promise<Diagnos
 
 	let problems = 0;
 	const diagnostics: Diagnostic[] = [];
-	while ((m = pattern.exec(text)) && problems < settings.maxNumberOfProblems) {
+	while ((m = pattern.exec(text)) != null && problems < settings.maxNumberOfProblems) {
 		problems++;
 		const diagnostic: Diagnostic = {
 			severity: DiagnosticSeverity.Warning,

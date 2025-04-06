@@ -1,6 +1,6 @@
 {
-	"name": "zinnia",
-	"description": "Zinnia Lanugage Server",
+	"name": "zinnia-language",
+	"description": "Zinnia Lanugage Support",
 	"author": "Jeff Manzione",
 	"license": "MIT",
 	"version": "1.0.1",
@@ -8,7 +8,7 @@
 		"type": "git",
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
 	},
-	"publisher": "jeffreymanzione",
+	"publisher": "jeffmanzione",
 	"categories": [],
 	"keywords": [
 		"multi-root ready"
@@ -65,8 +65,8 @@
 	},
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
-		"compile": "tsc -b",
-		"watch": "tsc -b -w",
+		"compile": "npx tsc -b",
+		"watch": "npmx tsc -b -w",
 		"lint": "eslint ./client/src ./server/src --ext .ts,.tsx",
 		"postinstall": "cd client && npm install && cd ../server && npm install && cd ..",
 		"test": "sh ./scripts/e2e.sh"
@@ -77,11 +77,11 @@
 		"@typescript-eslint/eslint-plugin": "^7.1.0",
 		"@typescript-eslint/parser": "^7.1.0",
 		"eslint": "^8.57.0",
-		"mocha": "^10.3.0",
-		"typescript": "^5.4.5"
+		"mocha": "^10.3.0"
 	},
 	"dependencies": {
-		"tsc": "^2.0.4",
-		"typescript-parsec": "^0.3.4"
+		"typescript": "^5.8.2",
+		"typescript-parsec": "^0.3.4",
+		"zinnia-language": "file:"
 	}
 }

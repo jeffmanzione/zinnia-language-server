@@ -106,13 +106,18 @@ export interface FunctionStat {
 	annots: AnnotationExpr[];
 }
 
+export interface SpecialMethodIdentifierExpr {
+	kind: 'SpecialMethodIdentifierExpr';
+	token: Token;
+}
+
 export interface MethodStat {
 	kind: 'MethodStat';
 	methodTok?: Token;
 	asyncTok?: Token;
 	lparen: Token;
 	rparen: Token;
-	name: IdentifierExpr | NewExpr;
+	name: IdentifierExpr | NewExpr | SpecialMethodIdentifierExpr;
 	params: ParamExpr[];
 	isNamed: boolean;
 	stat: Statement;

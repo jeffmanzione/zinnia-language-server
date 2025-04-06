@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
-import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, Statement, StaticStat, TryStat, WhileStat } from './statements';
+import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
-import { AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, PostfixExpr, PrimaryExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr, UnaryExpr, isConstantExpr, isPostfixExpr } from './expressions';
+import { AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, TupleChainExpr, UnaryChainExpr, isConstantExpr, isPostfixExpr } from './expressions';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -213,6 +213,7 @@ interface SemanticParam {
 	ast: ParamExpr;
 	name: SemanticIdentifier;
 	isField: boolean;
+	defaultValue?: SemanticExpression;
 }
 
 interface SemanticMethod {
@@ -314,8 +315,8 @@ export interface SemanticModule {
 }
 
 class Block {
-	private parent?: Block;
-	private members: Map<string, SemanticIdentifier> = new Map();
+	private readonly parent?: Block;
+	private readonly members: Map<string, SemanticIdentifier> = new Map();
 
 	constructor(parent?: Block) { this.parent = parent; }
 
@@ -325,18 +326,25 @@ class Block {
 		return sid;
 	}
 
-	lookupOrCreateIdentifier(id: IdentifierExpr | NewExpr | string, type: IdType, modifiers: string[] = []): SemanticIdentifier {
+	lookupOrCreateIdentifier(id: IdentifierExpr | SpecialMethodIdentifierExpr | NewExpr | string, type: IdType, modifiers: string[] = []): SemanticIdentifier {
 		const idText = typeof id === 'string' ? id : id.token.text;
 		const foundId = this.findIdentifier(idText);
 		if (foundId != null) {
 			return foundId;
 		}
+
+		let ast: IdentifierExpr;
+
+		if (typeof id === 'string') {
+			ast = { kind: 'IdentifierExpr' } as IdentifierExpr;
+		} else if (id.kind === 'IdentifierExpr') {
+			ast = id;
+		} else {
+			ast = { kind: 'IdentifierExpr', token: id.token };
+		}
+
 		const sid = new SemanticIdentifier(
-			typeof id === 'string'
-				? { kind: 'IdentifierExpr' } as IdentifierExpr
-				: ('kind' in id && id.kind === 'NewExpr')
-					? { kind: 'IdentifierExpr', token: id.token }
-					: id,
+			ast,
 			type,
 			modifiers,
 			idText);
@@ -345,11 +353,7 @@ class Block {
 	}
 
 	findIdentifier(id: string): SemanticIdentifier | undefined {
-
 		if (this.members.has(id)) {
-			if (id === '_ClientConnection') {
-				console.log(this.members.get(id));
-			}
 			return this.members.get(id);
 		}
 		if (this.parent != null) {
@@ -389,7 +393,13 @@ function createToken(token: Token, type: string, modifiers: string[] = []): Sema
 }
 
 function generateTokensForConstant(cnst: SemanticConstant, context: SemanticContext, tokens: SemanticToken[]): void {
-	tokens.push(createToken(cnst.ast.token, 'number', ['constant']));
+	if ('tokens' in cnst.ast) {
+		for (const tok of cnst.ast.tokens) {
+			tokens.push(createToken(tok, 'number', ['constant']));
+		}
+	} else {
+		tokens.push(createToken(cnst.ast.token, 'number', ['constant']));
+	}
 }
 
 function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, tokens: SemanticToken[]): void {
@@ -552,6 +562,9 @@ function generateTokensForAnon(anon: SemanticAnon, context: SemanticContext, tok
 		if (param.isField) {
 			tokens.push(createToken(param.ast.field!, 'keyword'));
 		}
+		if (param.defaultValue != null) {
+			generateTokensForExpression(param.defaultValue, context, tokens);
+		}
 	}
 	generateTokensForStatement(anon.stat, context, tokens);
 }
@@ -639,6 +652,9 @@ function generateTokensForMethod(meth: SemanticMethod, context: SemanticContext,
 		if (param.isField) {
 			tokens.push(createToken(param.ast.field!, 'keyword'));
 		}
+		if (param.defaultValue != null) {
+			generateTokensForExpression(param.defaultValue, context, tokens);
+		}
 	}
 	generateTokensForStatement(meth.stat, context, tokens);
 }
@@ -696,6 +712,9 @@ function generateTokensForFunction(func: SemanticFunction, context: SemanticCont
 		generateTokensForIdentifier(param.name, context, tokens);
 		if (param.isField) {
 			tokens.push(createToken(param.ast.field!, 'keyword'));
+		}
+		if (param.defaultValue != null) {
+			generateTokensForExpression(param.defaultValue, context, tokens);
 		}
 	}
 	generateTokensForStatement(func.stat, context, tokens);
@@ -776,7 +795,7 @@ function processUnary(unary: UnaryChainExpr, context: SemanticContext): Semantic
 	};
 }
 
-function processIdentifier(id: IdentifierExpr | NewExpr, context: SemanticContext, type: IdType = 'variable', modifiers: string[] = []): SemanticIdentifier {
+function processIdentifier(id: IdentifierExpr | NewExpr | SpecialMethodIdentifierExpr, context: SemanticContext, type: IdType = 'variable', modifiers: string[] = []): SemanticIdentifier {
 	const identifier = context.block.lookupOrCreateIdentifier(id, type, modifiers);
 	identifier.addToken(id.token);
 	return identifier;
@@ -903,7 +922,8 @@ function processAnon(expr: AnonExpr, context: SemanticContext): SemanticAnon {
 		params.push({
 			ast: param,
 			name: processIdentifier(param.name, newContext, 'parameter'),
-			isField: param.field != null
+			isField: param.field != null,
+			defaultValue: param.defaultValue == null ? undefined : processExpression(param.defaultValue, newContext)
 		});
 	}
 	return {
@@ -955,7 +975,12 @@ function processExpression(expr: Expression | NamedArgExpr, context: SemanticCon
 }
 
 function processConstant(expr: ConstantExpr, context: SemanticContext): SemanticExpression {
-	const text = expr.token.text;
+	let text: string;
+	if ('tokens' in expr) {
+		text = expr.tokens.map(tok => tok.text).join('');
+	} else {
+		text = expr.token.text;
+	}
 	return {
 		ast: expr,
 		text: text,
@@ -1007,7 +1032,8 @@ function processFunction(stat: FunctionStat, context: SemanticContext): Semantic
 		params.push({
 			ast: param,
 			name: processIdentifier(param.name, newContext, 'parameter'),
-			isField: param.field != null
+			isField: param.field != null,
+			defaultValue: param.defaultValue == null ? undefined : processExpression(param.defaultValue, newContext)
 		});
 	}
 	return {
@@ -1138,13 +1164,14 @@ function processMethod(stat: MethodStat, name: SemanticIdentifier, fields: Seman
 			fields.push({
 				ast: param,
 				name: processIdentifier(param.name, context, 'property'),
-				token: param.name.token
+				token: param.name.token,
 			});
 		}
 		params.push({
 			ast: param,
 			name: processIdentifier(param.name, newContext, 'parameter'),
-			isField: param.field != null
+			isField: param.field != null,
+			defaultValue: param.defaultValue == null ? undefined : processExpression(param.defaultValue, context)
 		});
 	}
 	return {

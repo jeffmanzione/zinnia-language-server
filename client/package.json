@@ -1,5 +1,5 @@
 {
-	"name": "zinnia-client",
+	"name": "zinnia-language-client",
 	"description": "VSCode part of the Zinnia language server",
 	"author": "Microsoft Corporation",
 	"license": "MIT",
@@ -7,14 +7,15 @@
 	"publisher": "vscode",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/Microsoft/vscode-extension-samples"
+		"url": "https://github.com/jeffmanzione/zinnia-language-server"
 	},
 	"engines": {
 		"vscode": "^1.75.0"
 	},
 	"dependencies": {
 		"typescript-parsec": "^0.3.4",
-		"vscode-languageclient": "^9.0.1"
+		"vscode-languageclient": "^9.0.1",
+		"zinnia-language-client": "file:"
 	},
 	"devDependencies": {
 		"@types/vscode": "^1.75.1",

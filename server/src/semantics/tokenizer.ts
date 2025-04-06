@@ -50,6 +50,8 @@ export enum TokenKind {
 	KEYWORD_TRY,
 	KEYWORD_WHILE,
 
+	SYMBOL_ARRAY_ACCESS,
+	SYMBOL_ARRAY_SET,
 	SYMBOL_LPAREN,
 	SYMBOL_RPAREN,
 	SYMBOL_LBRACE,
@@ -94,8 +96,8 @@ export enum TokenKind {
 
 export const zinniaTokenizer = buildLexer([
 	[true, /^'(\\'|[^'])*'/g, TokenKind.LITERAL_STRING],
-	[true, /^-?\d+/g, TokenKind.LITEARL_INTEGER],
-	[true, /^-?\d+(\.\d+)?/g, TokenKind.LITEARL_FLOAT],
+	[true, /^\d+\.\d+/g, TokenKind.LITEARL_FLOAT],
+	[true, /^\d+/g, TokenKind.LITEARL_INTEGER],
 
 	[true, /^(\r?\n)+/g, TokenKind.NEWLINE],
 
@@ -144,6 +146,8 @@ export const zinniaTokenizer = buildLexer([
 	[true, /^try/g, TokenKind.KEYWORD_TRY],
 	[true, /^while/g, TokenKind.KEYWORD_WHILE],
 
+	[true, /^\[\]/g, TokenKind.SYMBOL_ARRAY_ACCESS],
+	[true, /^\[\]=/g, TokenKind.SYMBOL_ARRAY_SET],
 	[true, /^\(/g, TokenKind.SYMBOL_LPAREN],
 	[true, /^\)/g, TokenKind.SYMBOL_RPAREN],
 	[true, /^\{/g, TokenKind.SYMBOL_LBRACE],
@@ -179,9 +183,8 @@ export const zinniaTokenizer = buildLexer([
 	[true, /^:/g, TokenKind.SYMBOL_COLON],
 	[true, /^\./g, TokenKind.SYMBOL_PERIOD],
 
-
-	[true, /^[a-zA-Z_][a-zA-Z0-9_]*/g, TokenKind.IDENTIFIER],
+	[true, /^\$?[a-zA-Z_][a-zA-Z0-9_]*/g, TokenKind.IDENTIFIER],
 	[false, /^;[^\n]*\n/g, TokenKind.COMMENT_LINE],
-	[false, /^[/]\*([^*]|\*+[^/])*\*+[/]/g, TokenKind.COMMENT_BLOCK],
+	[false, /^\/\*([^*]|\*+[^/])*\*+\//g, TokenKind.COMMENT_BLOCK],
 	[false, /^(?:(?!\n)\s)+/g, TokenKind.SPACE]
 ]);

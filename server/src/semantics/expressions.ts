@@ -22,15 +22,14 @@ export interface BoolExpr {
 
 export interface IntExpr {
 	kind: 'IntExpr';
-	token: Token;
+	tokens: Token[];
 	value: number;
 }
 
 export interface FloatExpr {
 	kind: 'FloatExpr';
-	token: Token;
+	tokens: Token[];
 	value: number;
-
 }
 
 export interface StringExpr {
@@ -228,8 +227,8 @@ export interface ParamExpr {
 export interface AnonExpr {
 	kind: 'AnonExpr';
 	asyncTok?: Token;
-	lparen: Token;
-	rparen: Token;
+	lparen?: Token;
+	rparen?: Token;
 	params: ParamExpr[];
 	isNamed: boolean;
 	arrow?: Token;

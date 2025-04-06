@@ -1,0 +1,1 @@
+{"root":["./src/interfaces.ts","./src/lib.ts","./src/server.ts","./src/semantics/analyzer.ts","./src/semantics/expressions.ts","./src/semantics/parser.ts","./src/semantics/semantic.ts","./src/semantics/statements.ts","./src/semantics/tokenizer.ts"],"version":"5.8.2"}
