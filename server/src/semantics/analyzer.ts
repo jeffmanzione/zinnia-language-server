@@ -1,4 +1,4 @@
-import { SemanticModule, SemanticToken, generateSemanticTokens } from './semantic';
+import { SemanticContext, SemanticIdentifier, SemanticModule, SemanticToken, generateSemanticTokens } from './semantic';
 import { zinniaTokenizer } from './tokenizer';
 import { MODULE } from './parser';
 import { expectEOF, expectSingleResult } from 'typescript-parsec';
@@ -11,6 +11,7 @@ import * as path from 'path';
 
 interface SemanticDocInfo {
 	path: string;
+	context: SemanticContext;
 	module: SemanticModule;
 	tokens: SemanticToken[];
 	version: number;
@@ -35,11 +36,11 @@ export class SemanticAnalyzer {
 	private _workspacePaths: string[] = [];
 
 	async init(workspaceFolders: WorkspaceFolder[]): Promise<void> {
-		this._workspacePaths = workspaceFolders.map(wf => URI.parse(wf.uri).fsPath);
+		this._workspacePaths = workspaceFolders.map(wf => URI.parse(wf.uri).fsPath.replace(/\\/g, '/'));
 		const libs = await fetchZinniaLibs();
 		for (const lib of libs) {
 			const info = this.parseDocument(lib);
-			this._libNamesToFilePaths.set(info.path.slice('lib/'.length, info.path.length - '.zn'.length), info.path);
+			this._libNamesToFilePaths.set(info.path.slice('/lib/'.length, info.path.length - '.zn'.length), info.path);
 		}
 	}
 
@@ -75,14 +76,16 @@ export class SemanticAnalyzer {
 			path = params;
 			version = 0;
 		} else {
-			path = URI.parse(params.uri).fsPath;
+			path = URI.parse(params.uri).fsPath.replace(/\\/g, '/');
 			version = params.version;
 		}
 
-		const info = this._docs.get(path);
-		if (info?.version == version) {
-			return info;
-		}
+		// const info = this._docs.get(path);
+		// if (info?.version == version) {
+		// 	return info;
+		// }
+
+		console.log(`Processing ${path}`);
 
 		let text: string;
 		if (typeof params === 'string') {
@@ -95,9 +98,10 @@ export class SemanticAnalyzer {
 			const token = zinniaTokenizer.parse(text);
 			const parserOutput = MODULE.parse(token);
 			const output = expectSingleResult(expectEOF(parserOutput));
-			const [module, tokens] = generateSemanticTokens(output);
+			const [context, module, tokens] = generateSemanticTokens(path, this, output);
 			const info: SemanticDocInfo = {
 				path: path,
+				context: context,
 				module: module,
 				tokens: tokens,
 				version: version
@@ -108,5 +112,15 @@ export class SemanticAnalyzer {
 			console.log(e);
 			return {} as SemanticDocInfo;
 		}
+	}
+
+	private get builtin(): SemanticDocInfo | undefined {
+		return this._docs.get(this._libNamesToFilePaths.get('builtin')!);
+	}
+
+	searchBuiltinForId(id: string): SemanticIdentifier | undefined {
+		const result = this.builtin?.context.block.findIdentifier(id, false);
+		console.log(`Searching in builtin for '${id}=${result?.type ?? 'NOT_FOUND'}'`);
+		return result;
 	}
 }

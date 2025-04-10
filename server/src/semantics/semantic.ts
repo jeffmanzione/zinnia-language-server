@@ -2,6 +2,7 @@ import * as parsec from 'typescript-parsec';
 import { ClassStat, CompoundStat, FieldStat, ForStat, ForeachStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat } from './statements';
 import { TokenKind } from './tokenizer';
 import { AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, IsExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, TupleChainExpr, UnaryChainExpr, isConstantExpr, isPostfixExpr } from './expressions';
+import { SemanticAnalyzer } from './analyzer';
 
 type Token = parsec.Token<TokenKind>;
 
@@ -12,6 +13,7 @@ export interface SemanticToken {
 	row: number;
 	type: string;
 	modifiers: string[];
+	filePath: string;
 }
 
 type IdType =
@@ -23,11 +25,16 @@ type IdType =
 	| 'class'
 	| 'decorator';
 
-class SemanticIdentifier {
+interface TokenFile {
+	token: Token;
+	filePath: string;
+}
+
+export class SemanticIdentifier {
 	ast?: IdentifierExpr;
 	id: string;
 	type: IdType;
-	tokens: Token[] = [];
+	tokens: TokenFile[] = [];
 	modifiers: string[];
 	tokensGenerated: boolean = false;
 
@@ -38,8 +45,8 @@ class SemanticIdentifier {
 		this.modifiers = modifiers;
 	}
 
-	addToken(token: Token): void {
-		this.tokens.push(token);
+	addToken(token: Token, filePath: string): void {
+		this.tokens.push({ token: token, filePath: filePath });
 	}
 
 	hasGenerated(): boolean {
@@ -315,10 +322,9 @@ export interface SemanticModule {
 }
 
 class Block {
-	private readonly parent?: Block;
 	private readonly members: Map<string, SemanticIdentifier> = new Map();
 
-	constructor(parent?: Block) { this.parent = parent; }
+	constructor(private readonly analyzer: SemanticAnalyzer, private readonly parent?: Block) { }
 
 	createIdentifier(id: IdentifierExpr, type: IdType): SemanticIdentifier {
 		const sid = new SemanticIdentifier(id, type);
@@ -352,23 +358,25 @@ class Block {
 		return sid;
 	}
 
-	findIdentifier(id: string): SemanticIdentifier | undefined {
+	findIdentifier(id: string, lookInBuiltin: boolean = true): SemanticIdentifier | undefined {
 		if (this.members.has(id)) {
 			return this.members.get(id);
 		}
 		if (this.parent != null) {
-			return this.parent.findIdentifier(id);
+			return this.parent.findIdentifier(id, lookInBuiltin);
+		}
+		if (lookInBuiltin) {
+			// As a last hope, look in builtin.
+			return this.analyzer.searchBuiltinForId(id);
 		}
 		return undefined;
 	}
 }
 
-class SemanticContext {
+export class SemanticContext {
 	module?: SemanticModule;
-	block: Block;
 
-	constructor(block: Block = new Block()) {
-		this.block = block;
+	constructor(private readonly analyzer: SemanticAnalyzer, readonly filePath: string, readonly block: Block = new Block(analyzer)) {
 	}
 
 	setModule(module: SemanticModule): void {
@@ -376,39 +384,52 @@ class SemanticContext {
 	}
 
 	newBlock(): SemanticContext {
-		const copy = new SemanticContext(new Block(this.block));
+		const copy = new SemanticContext(this.analyzer, this.filePath, new Block(this.analyzer, this.block));
 		copy.setModule(this.module!);
 		return copy;
 	}
 }
 
-function createToken(token: Token, type: string, modifiers: string[] = []): SemanticToken {
-	return {
-		text: token.text,
-		col: token.pos.columnBegin - 1,
-		row: token.pos.rowBegin - 1,
-		type: type,
-		modifiers: modifiers
-	};
+class TokenGenerator {
+	private readonly _tokens: SemanticToken[] = [];
+
+	constructor(private readonly _filePath: string) { }
+
+	createToken(token: Token, type: string, modifiers: string[] = [], filePath = this._filePath,): SemanticToken {
+		const semanticToken = {
+			text: token.text,
+			col: token.pos.columnBegin - 1,
+			row: token.pos.rowBegin - 1,
+			type: type,
+			filePath: filePath,
+			modifiers: modifiers
+		};
+		this._tokens.push(semanticToken);
+		return semanticToken;
+	}
+
+	finalizeTokens(): SemanticToken[] {
+		return this._tokens.filter(tok => tok.filePath === this._filePath);
+	}
 }
 
-function generateTokensForConstant(cnst: SemanticConstant, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForConstant(cnst: SemanticConstant, context: SemanticContext, generator: TokenGenerator): void {
 	if ('tokens' in cnst.ast) {
 		for (const tok of cnst.ast.tokens) {
-			tokens.push(createToken(tok, 'number', ['constant']));
+			generator.createToken(tok, 'number', ['constant']);
 		}
 	} else {
-		tokens.push(createToken(cnst.ast.token, 'number', ['constant']));
+		generator.createToken(cnst.ast.token, 'number', ['constant']);
 	}
 }
 
-function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForUnary(unary: SemanticUnary, context: SemanticContext, generator: TokenGenerator): void {
 	for (const un of unary.ast.unaries) {
 		if (un.kind === TokenKind.KEYWORD_AWAIT) {
-			tokens.push(createToken(un, 'keyword'));
+			generator.createToken(un, 'keyword');
 		}
 	}
-	generateTokensForExpression(unary.rhs, context, tokens);
+	generateTokensForExpression(unary.rhs, context, generator);
 }
 
 function selectIdType(id: SemanticIdentifier, token: Token): IdType {
@@ -418,8 +439,8 @@ function selectIdType(id: SemanticIdentifier, token: Token): IdType {
 	return 'function';
 }
 
-function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticContext, tokens: SemanticToken[]): void {
-	if (id == null || id.hasGenerated()) {
+function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticContext, generator: TokenGenerator): void {
+	if (id == null /* || id.hasGenerated() */) {
 		return;
 	}
 	let doneFirst = false;
@@ -430,38 +451,38 @@ function generateTokensForIdentifier(id: SemanticIdentifier, context: SemanticCo
 			modifiers.push('declaration');
 			doneFirst = true;
 		}
-		tokens.push(
-			createToken(
-				tok,
-				selectIdType(id, tok),
-				modifiers)
+		generator.createToken(
+			tok.token,
+			selectIdType(id, tok.token),
+			modifiers,
+			tok.filePath
 		);
 	}
 	id.markGenerated();
 }
 
 
-function generateTokensForAssign(asgn: SemanticAssign, context: SemanticContext, tokens: SemanticToken[]): void {
-	generateTokensForAssignLhs(asgn.lhs, context, tokens);
-	generateTokensForExpression(asgn.rhs, context, tokens);
+function generateTokensForAssign(asgn: SemanticAssign, context: SemanticContext, generator: TokenGenerator): void {
+	generateTokensForAssignLhs(asgn.lhs, context, generator);
+	generateTokensForExpression(asgn.rhs, context, generator);
 }
 
 
-function generateTokensForAnnotation(annot: SemanticAnnotation, context: SemanticContext, tokens: SemanticToken[]): void {
-	generateTokensForIdentifier(annot.firstId, context, tokens);
+function generateTokensForAnnotation(annot: SemanticAnnotation, context: SemanticContext, generator: TokenGenerator): void {
+	generateTokensForIdentifier(annot.firstId, context, generator);
 	if (annot.secondId != null) {
-		tokens.push(createToken(annot.secondId, 'decorator'));
+		generator.createToken(annot.secondId, 'decorator');
 	}
 	if (annot.params != null) {
 		for (const param of annot.params) {
-			generateTokensForExpression(param, context, tokens);
+			generateTokensForExpression(param, context, generator);
 		}
 	}
 }
 
-function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticContext, generator: TokenGenerator): void {
 	if (pstfx.base != null) { // TODO remove check.
-		generateTokensForExpression(pstfx.base, context, tokens);
+		generateTokensForExpression(pstfx.base, context, generator);
 	}
 	for (const nestedExpr of pstfx.nestedExprs) {
 		if (nestedExpr == null) {
@@ -469,258 +490,258 @@ function generateTokensForPostfix(pstfx: SemanticPostfix, context: SemanticConte
 		}
 		if ('nextToken' in nestedExpr) {
 			const tok = nestedExpr as Token;
-			tokens.push(createToken(tok, tok.next!.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property'));
+			generator.createToken(tok, tok.next!.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property');
 		} else {
-			generateTokensForExpression(nestedExpr as SemanticExpression, context, tokens);
+			generateTokensForExpression(nestedExpr as SemanticExpression, context, generator);
 		}
 	}
 }
 
-function generateTokensForNamedArg(arg: SemanticNamedArg, context: SemanticContext, tokens: SemanticToken[]): void {
-	generateTokensForIdentifier(arg.name, context, tokens);
-	generateTokensForExpression(arg.value, context, tokens);
+function generateTokensForNamedArg(arg: SemanticNamedArg, context: SemanticContext, generator: TokenGenerator): void {
+	generateTokensForIdentifier(arg.name, context, generator);
+	generateTokensForExpression(arg.value, context, generator);
 }
 
-function generateTokensForTuple(tuple: SemanticTuple, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForTuple(tuple: SemanticTuple, context: SemanticContext, generator: TokenGenerator): void {
 	for (const item of tuple.items) {
 		if (item == null) {
 			continue;
 		}
-		generateTokensForExpression(item, context, tokens);
+		generateTokensForExpression(item, context, generator);
 	}
 }
 
-function generateTokensForArray(arr: SemanticArray, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForArray(arr: SemanticArray, context: SemanticContext, generator: TokenGenerator): void {
 	for (const item of arr.items) {
 		if (item == null) {
 			continue;
 		}
-		generateTokensForExpression(item, context, tokens);
+		generateTokensForExpression(item, context, generator);
 	}
 }
 
-function generateTokensForMap(map: SemanticMap, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForMap(map: SemanticMap, context: SemanticContext, generator: TokenGenerator): void {
 	for (const [k, v] of map.entries) {
 		if (k != null) {
-			generateTokensForExpression(k, context, tokens);
+			generateTokensForExpression(k, context, generator);
 		}
 		if (v != null) {
-			generateTokensForExpression(v, context, tokens);
+			generateTokensForExpression(v, context, generator);
 		}
 	}
 }
 
-function generateTokensForOp(op: SemanticOp, context: SemanticContext, tokens: SemanticToken[]) {
+function generateTokensForOp(op: SemanticOp, context: SemanticContext, generator: TokenGenerator) {
 	for (const expr of op.exprs) {
 		if (expr != null) {
-			generateTokensForExpression(expr, context, tokens);
+			generateTokensForExpression(expr, context, generator);
 		}
 	}
 }
 
-function generateTokensForIs(expr: SemanticIs, context: SemanticContext, tokens: SemanticToken[]) {
-	tokens.push(createToken(expr.ast.isTok, 'keyword'));
-	generateTokensForExpression(expr.lhs, context, tokens);
-	generateTokensForExpression(expr.rhs, context, tokens);
+function generateTokensForIs(expr: SemanticIs, context: SemanticContext, generator: TokenGenerator) {
+	generator.createToken(expr.ast.isTok, 'keyword');
+	generateTokensForExpression(expr.lhs, context, generator);
+	generateTokensForExpression(expr.rhs, context, generator);
 }
 
-function generateTokensForIn(expr: SemanticIn, context: SemanticContext, tokens: SemanticToken[]) {
-	tokens.push(createToken(expr.ast.inTok, 'keyword'));
-	generateTokensForExpression(expr.lhs, context, tokens);
-	generateTokensForExpression(expr.rhs, context, tokens);
+function generateTokensForIn(expr: SemanticIn, context: SemanticContext, generator: TokenGenerator) {
+	generator.createToken(expr.ast.inTok, 'keyword');
+	generateTokensForExpression(expr.lhs, context, generator);
+	generateTokensForExpression(expr.rhs, context, generator);
 }
 
-function generateTokensForCondition(cond: SemanticCondition, context: SemanticContext, tokens: SemanticToken[]) {
-	tokens.push(createToken(cond.ast.if, 'keyword'));
+function generateTokensForCondition(cond: SemanticCondition, context: SemanticContext, generator: TokenGenerator) {
+	generator.createToken(cond.ast.if, 'keyword');
 	if (cond.ast.then != null) {
-		tokens.push(createToken(cond.ast.then, 'keyword'));
+		generator.createToken(cond.ast.then, 'keyword');
 	}
 	if (cond.ast.else != null) {
-		tokens.push(createToken(cond.ast.else, 'keyword'));
+		generator.createToken(cond.ast.else, 'keyword');
 	}
-	generateTokensForExpression(cond.cond, context, tokens);
-	generateTokensForExpression(cond.ifTrue, context, tokens);
+	generateTokensForExpression(cond.cond, context, generator);
+	generateTokensForExpression(cond.ifTrue, context, generator);
 	if (cond.ifFalse != null) {
-		generateTokensForExpression(cond.ifFalse, context, tokens);
+		generateTokensForExpression(cond.ifFalse, context, generator);
 	}
 }
 
-function generateTokensForRange(rng: SemanticRange, context: SemanticContext, tokens: SemanticToken[]) {
-	generateTokensForExpression(rng.start, context, tokens);
-	generateTokensForExpression(rng.end, context, tokens);
+function generateTokensForRange(rng: SemanticRange, context: SemanticContext, generator: TokenGenerator) {
+	generateTokensForExpression(rng.start, context, generator);
+	generateTokensForExpression(rng.end, context, generator);
 	if (rng.inc != null) {
-		generateTokensForExpression(rng.inc, context, tokens);
+		generateTokensForExpression(rng.inc, context, generator);
 	}
 }
 
-function generateTokensForAnon(anon: SemanticAnon, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForAnon(anon: SemanticAnon, context: SemanticContext, generator: TokenGenerator): void {
 	if (anon.ast.asyncTok != null) {
-		tokens.push(createToken(anon.ast.asyncTok, 'keyword', ['async']));
+		generator.createToken(anon.ast.asyncTok, 'keyword', ['async']);
 	}
 	for (const param of anon.params) {
-		generateTokensForIdentifier(param.name, context, tokens);
+		generateTokensForIdentifier(param.name, context, generator);
 		if (param.isField) {
-			tokens.push(createToken(param.ast.field!, 'keyword'));
+			generator.createToken(param.ast.field!, 'keyword');
 		}
 		if (param.defaultValue != null) {
-			generateTokensForExpression(param.defaultValue, context, tokens);
+			generateTokensForExpression(param.defaultValue, context, generator);
 		}
 	}
-	generateTokensForStatement(anon.stat, context, tokens);
+	generateTokensForStatement(anon.stat, context, generator);
 }
 
-function generateTokensForExpression(expr: SemanticExpression, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForExpression(expr: SemanticExpression, context: SemanticContext, generator: TokenGenerator): void {
 	if (expr?.ast == null) {
 		return;
 	}
 	if (isConstantExpr(expr.ast)) {
-		generateTokensForConstant(expr as SemanticConstant, context, tokens);
+		generateTokensForConstant(expr as SemanticConstant, context, generator);
 	} else if (expr.ast.kind === 'IdentifierExpr') {
-		generateTokensForIdentifier(expr as SemanticIdentifier, context, tokens);
+		generateTokensForIdentifier(expr as SemanticIdentifier, context, generator);
 	} else if (expr.ast.kind === 'UnaryChainExpr') {
-		generateTokensForUnary(expr as SemanticUnary, context, tokens);
+		generateTokensForUnary(expr as SemanticUnary, context, generator);
 	} else if (expr.ast.kind === 'AssignBaseExpr') {
-		generateTokensForAssign(expr as SemanticAssign, context, tokens);
+		generateTokensForAssign(expr as SemanticAssign, context, generator);
 	} else if (expr.ast.kind === 'PostfixChainExpr') {
-		generateTokensForPostfix(expr as SemanticPostfix, context, tokens);
+		generateTokensForPostfix(expr as SemanticPostfix, context, generator);
 	} else if (expr.ast.kind === 'TupleChainExpr') {
-		generateTokensForTuple(expr as SemanticTuple, context, tokens);
+		generateTokensForTuple(expr as SemanticTuple, context, generator);
 	} else if (expr.ast.kind === 'ArrayExpr') {
-		generateTokensForArray(expr as SemanticArray, context, tokens);
+		generateTokensForArray(expr as SemanticArray, context, generator);
 	} else if (expr.ast.kind === 'MapExpr') {
-		generateTokensForMap(expr as SemanticMap, context, tokens);
+		generateTokensForMap(expr as SemanticMap, context, generator);
 	} else if (expr.ast.kind === 'NamedArgExpr') {
-		generateTokensForNamedArg(expr as SemanticNamedArg, context, tokens);
+		generateTokensForNamedArg(expr as SemanticNamedArg, context, generator);
 	} else if (expr.ast.kind === 'ParensExpr') {
 		if ((expr as SemanticParens).expr != null) {
-			generateTokensForExpression((expr as SemanticParens).expr, context, tokens);
+			generateTokensForExpression((expr as SemanticParens).expr, context, generator);
 		}
 	} else if (expr.ast.kind === 'IsExpr') {
-		return generateTokensForIs(expr as SemanticIs, context, tokens);
+		return generateTokensForIs(expr as SemanticIs, context, generator);
 	} else if (expr.ast.kind === 'InExpr') {
-		return generateTokensForIn(expr as SemanticIn, context, tokens);
+		return generateTokensForIn(expr as SemanticIn, context, generator);
 	} else if (expr.ast.kind === 'ConditionBaseExpr') {
-		return generateTokensForCondition(expr as SemanticCondition, context, tokens);
+		return generateTokensForCondition(expr as SemanticCondition, context, generator);
 	} else if (expr.ast.kind === 'RangeExpr') {
-		return generateTokensForRange(expr as SemanticRange, context, tokens);
+		return generateTokensForRange(expr as SemanticRange, context, generator);
 	} else if (expr.ast.kind === 'AnonExpr') {
-		return generateTokensForAnon(expr as SemanticAnon, context, tokens);
+		return generateTokensForAnon(expr as SemanticAnon, context, generator);
 	} else if (isOpExpr(expr.ast)) {
-		generateTokensForOp(expr as SemanticOp, context, tokens);
+		generateTokensForOp(expr as SemanticOp, context, generator);
 	}
 }
 
-function generateTokensForAssignLhs(asgn: SemanticAssignLhs, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForAssignLhs(asgn: SemanticAssignLhs, context: SemanticContext, generator: TokenGenerator): void {
 	if (asgn.ast.kind === 'IdentifierExpr') {
-		generateTokensForExpression(asgn.expr as SemanticIdentifier, context, tokens);
+		generateTokensForExpression(asgn.expr as SemanticIdentifier, context, generator);
 	} else if (isPostfixExpr(asgn.ast)) {
-		generateTokensForPostfix(asgn.expr as SemanticPostfix, context, tokens);
+		generateTokensForPostfix(asgn.expr as SemanticPostfix, context, generator);
 	} else if (asgn.expr != null) {
 		for (const expr of asgn.expr as SemanticAssignLhs[]) {
-			generateTokensForAssignLhs(expr, context, tokens);
+			generateTokensForAssignLhs(expr, context, generator);
 		}
 	}
 }
 
-function generateTokensForImport(imprt: SemanticImport, context: SemanticContext, tokens: SemanticToken[]): void {
-	tokens.push(createToken(imprt.ast.importTok, 'keyword'));
+function generateTokensForImport(imprt: SemanticImport, context: SemanticContext, generator: TokenGenerator): void {
+	generator.createToken(imprt.ast.importTok, 'keyword');
 	if (imprt.ast.asTok != null) {
-		tokens.push(createToken(imprt.ast.asTok, 'keyword'));
+		generator.createToken(imprt.ast.asTok, 'keyword');
 	}
 	if (imprt.ast.source.kind === 'StringExpr') {
-		tokens.push(createToken(imprt.ast.source.token, 'string'));
+		generator.createToken(imprt.ast.source.token, 'string');
 	} else {
-		generateTokensForIdentifier(imprt.name, context, tokens);
+		generateTokensForIdentifier(imprt.name, context, generator);
 	}
 }
 
-function generateTokensForMethod(meth: SemanticMethod, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForMethod(meth: SemanticMethod, context: SemanticContext, generator: TokenGenerator): void {
 	if (meth.annots != null) {
 		for (const annot of meth.annots) {
-			generateTokensForAnnotation(annot, context, tokens);
+			generateTokensForAnnotation(annot, context, generator);
 		}
 	}
 	if (meth.ast.methodTok != null) {
-		tokens.push(createToken(meth.ast.methodTok, 'keyword'));
+		generator.createToken(meth.ast.methodTok, 'keyword');
 	}
-	generateTokensForIdentifier(meth.name, context, tokens);
+	generateTokensForIdentifier(meth.name, context, generator);
 	if (meth.ast.asyncTok != null) {
-		tokens.push(createToken(meth.ast.asyncTok, 'keyword', ['async']));
+		generator.createToken(meth.ast.asyncTok, 'keyword', ['async']);
 	}
 	for (const param of meth.params) {
-		generateTokensForIdentifier(param.name, context, tokens);
+		generateTokensForIdentifier(param.name, context, generator);
 		if (param.isField) {
-			tokens.push(createToken(param.ast.field!, 'keyword'));
+			generator.createToken(param.ast.field!, 'keyword');
 		}
 		if (param.defaultValue != null) {
-			generateTokensForExpression(param.defaultValue, context, tokens);
+			generateTokensForExpression(param.defaultValue, context, generator);
 		}
 	}
-	generateTokensForStatement(meth.stat, context, tokens);
+	generateTokensForStatement(meth.stat, context, generator);
 }
 
-function generateTokensForClass(cls: SemanticClass, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForClass(cls: SemanticClass, context: SemanticContext, generator: TokenGenerator): void {
 	if (cls.annots != null) {
 		for (const annot of cls.annots) {
-			generateTokensForAnnotation(annot, context, tokens);
+			generateTokensForAnnotation(annot, context, generator);
 		}
 	}
 
-	tokens.push(createToken(cls.ast.classTok, 'keyword'));
-	generateTokensForIdentifier(cls.name, context, tokens);
+	generator.createToken(cls.ast.classTok, 'keyword');
+	generateTokensForIdentifier(cls.name, context, generator);
 
 	if (cls.superName != null) {
-		generateTokensForExpression(cls.superName, context, tokens);
+		generateTokensForExpression(cls.superName, context, generator);
 	}
 
 	for (const [_, sttc] of cls.statics) {
-		tokens.push(createToken(sttc.ast.staticTok, 'keyword'));
-		generateTokensForIdentifier(sttc.name, context, tokens);
-		generateTokensForExpression(sttc.expr, context, tokens);
+		generator.createToken(sttc.ast.staticTok, 'keyword');
+		generateTokensForIdentifier(sttc.name, context, generator);
+		generateTokensForExpression(sttc.expr, context, generator);
 	}
 
 	for (const classAst of cls.ast.stats) {
 		if (classAst.kind === 'FieldStat') {
-			tokens.push(createToken(classAst.fieldTok, 'keyword'));
+			generator.createToken(classAst.fieldTok, 'keyword');
 		}
 	}
 	for (const field of cls.fields) {
-		tokens.push(createToken(field.token, 'property'));
+		generator.createToken(field.token, 'property');
 		if (field.ast.kind === 'ParamExpr') {
-			tokens.push(createToken(field.ast.field!, 'keyword'));
+			generator.createToken(field.ast.field!, 'keyword');
 		}
 	}
 	for (const [_, meth] of cls.methods) {
-		generateTokensForMethod(meth, context, tokens);
+		generateTokensForMethod(meth, context, generator);
 	}
 }
 
-function generateTokensForFunction(func: SemanticFunction, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForFunction(func: SemanticFunction, context: SemanticContext, generator: TokenGenerator): void {
 	if (func.annots != null) {
 		for (const annot of func.annots) {
-			generateTokensForAnnotation(annot, context, tokens);
+			generateTokensForAnnotation(annot, context, generator);
 		}
 	}
 	if (func.ast.defTok != null) {
-		tokens.push(createToken(func.ast.defTok, 'keyword'));
+		generator.createToken(func.ast.defTok, 'keyword');
 	}
-	generateTokensForIdentifier(func.name, context, tokens);
+	generateTokensForIdentifier(func.name, context, generator);
 	if (func.ast.asyncTok != null) {
-		tokens.push(createToken(func.ast.asyncTok, 'keyword', ['async']));
+		generator.createToken(func.ast.asyncTok, 'keyword', ['async']);
 	}
 	for (const param of func.params) {
-		generateTokensForIdentifier(param.name, context, tokens);
+		generateTokensForIdentifier(param.name, context, generator);
 		if (param.isField) {
-			tokens.push(createToken(param.ast.field!, 'keyword'));
+			generator.createToken(param.ast.field!, 'keyword');
 		}
 		if (param.defaultValue != null) {
-			generateTokensForExpression(param.defaultValue, context, tokens);
+			generateTokensForExpression(param.defaultValue, context, generator);
 		}
 	}
-	generateTokensForStatement(func.stat, context, tokens);
+	generateTokensForStatement(func.stat, context, generator);
 }
 
-function generateTokensForStatement(stat: SemanticStatement, context: SemanticContext, tokens: SemanticToken[]): void {
+function generateTokensForStatement(stat: SemanticStatement, context: SemanticContext, generator: TokenGenerator): void {
 	if (stat === undefined) {
 		return;
 	}
@@ -728,63 +749,63 @@ function generateTokensForStatement(stat: SemanticStatement, context: SemanticCo
 	if (ast.kind === 'CompoundStat') {
 		const compoundStat = stat as SemanticCompound;
 		for (const sstat of compoundStat.stats) {
-			generateTokensForStatement(sstat, context, tokens);
+			generateTokensForStatement(sstat, context, generator);
 		}
 	} else if (ast.kind === 'SelectStat') {
 		const selectStat = stat as SemanticSelect;
-		tokens.push(createToken(ast.ifTok, 'keyword'));
-		generateTokensForStatement(selectStat.cond, context, tokens);
-		generateTokensForStatement(selectStat.ifTrue, context, tokens);
+		generator.createToken(ast.ifTok, 'keyword');
+		generateTokensForStatement(selectStat.cond, context, generator);
+		generateTokensForStatement(selectStat.ifTrue, context, generator);
 		if (selectStat.ifFalse != null) {
-			tokens.push(createToken(ast.elseTok!, 'keyword'));
-			generateTokensForStatement(selectStat.ifFalse, context, tokens);
+			generator.createToken(ast.elseTok!, 'keyword');
+			generateTokensForStatement(selectStat.ifFalse, context, generator);
 		}
 	} else if (ast.kind === 'ForStat') {
-		tokens.push(createToken(ast.forTok, 'keyword'));
-		generateTokensForExpression((stat as SemanticFor).first, context, tokens);
-		generateTokensForExpression((stat as SemanticFor).second, context, tokens);
-		generateTokensForExpression((stat as SemanticFor).third, context, tokens);
-		generateTokensForStatement((stat as SemanticFor).body, context, tokens);
+		generator.createToken(ast.forTok, 'keyword');
+		generateTokensForExpression((stat as SemanticFor).first, context, generator);
+		generateTokensForExpression((stat as SemanticFor).second, context, generator);
+		generateTokensForExpression((stat as SemanticFor).third, context, generator);
+		generateTokensForStatement((stat as SemanticFor).body, context, generator);
 	} else if (ast.kind === 'ForeachStat') {
-		tokens.push(createToken(ast.forTok, 'keyword'));
-		tokens.push(createToken(ast.inTok, 'keyword'));
-		generateTokensForAssignLhs((stat as SemanticForeach).lhs, context, tokens);
-		generateTokensForExpression((stat as SemanticForeach).rhs, context, tokens);
-		generateTokensForStatement((stat as SemanticForeach).body, context, tokens);
+		generator.createToken(ast.forTok, 'keyword');
+		generator.createToken(ast.inTok, 'keyword');
+		generateTokensForAssignLhs((stat as SemanticForeach).lhs, context, generator);
+		generateTokensForExpression((stat as SemanticForeach).rhs, context, generator);
+		generateTokensForStatement((stat as SemanticForeach).body, context, generator);
 	} else if (ast.kind === 'WhileStat') {
-		tokens.push(createToken(ast.whileTok, 'keyword'));
-		generateTokensForExpression((stat as SemanticWhile).cond, context, tokens);
-		generateTokensForStatement((stat as SemanticWhile).body, context, tokens);
+		generator.createToken(ast.whileTok, 'keyword');
+		generateTokensForExpression((stat as SemanticWhile).cond, context, generator);
+		generateTokensForStatement((stat as SemanticWhile).body, context, generator);
 	} else if (ast.kind === 'JumpStat') {
-		tokens.push(createToken(ast.token, 'keyword'));
+		generator.createToken(ast.token, 'keyword');
 		if ((stat as SemanticJump).expr != null) {
-			generateTokensForExpression((stat as SemanticJump).expr!, context, tokens);
+			generateTokensForExpression((stat as SemanticJump).expr!, context, generator);
 		}
 	} else if (ast.kind === 'TryStat') {
-		tokens.push(createToken(ast.tryTok, 'keyword'));
-		tokens.push(createToken(ast.catchTok, 'keyword'));
-		generateTokensForStatement((stat as SemanticTry).tryStat, context, tokens);
-		generateTokensForAssignLhs((stat as SemanticTry).catchAssign, context, tokens);
-		generateTokensForStatement((stat as SemanticTry).catchStat, context, tokens);
+		generator.createToken(ast.tryTok, 'keyword');
+		generator.createToken(ast.catchTok, 'keyword');
+		generateTokensForStatement((stat as SemanticTry).tryStat, context, generator);
+		generateTokensForAssignLhs((stat as SemanticTry).catchAssign, context, generator);
+		generateTokensForStatement((stat as SemanticTry).catchStat, context, generator);
 	} else if (ast.kind === 'RaiseStat') {
-		tokens.push(createToken(ast.raise, 'keyword'));
-		generateTokensForExpression((stat as SemanticRaise).expr, context, tokens);
+		generator.createToken(ast.raise, 'keyword');
+		generateTokensForExpression((stat as SemanticRaise).expr, context, generator);
 	} else if (ast.kind === 'FunctionStat') {
-		generateTokensForFunction((stat as SemanticFunction), context, tokens);
+		generateTokensForFunction((stat as SemanticFunction), context, generator);
 	} else {
-		generateTokensForExpression(stat as SemanticExpression, context, tokens);
+		generateTokensForExpression(stat as SemanticExpression, context, generator);
 	}
 }
 
-function generatTokensForModule(module: SemanticModule, context: SemanticContext, tokens: SemanticToken[]): void {
+function generatTokensForModule(module: SemanticModule, context: SemanticContext, generator: TokenGenerator): void {
 	for (const imprt of module.imports) {
-		generateTokensForImport(imprt, context, tokens);
+		generateTokensForImport(imprt, context, generator);
 	}
 	for (const cls of module.classes) {
-		generateTokensForClass(cls, context, tokens);
+		generateTokensForClass(cls, context, generator);
 	}
 	for (const stat of module.statements) {
-		generateTokensForStatement(stat, context, tokens);
+		generateTokensForStatement(stat, context, generator);
 	}
 }
 
@@ -797,7 +818,7 @@ function processUnary(unary: UnaryChainExpr, context: SemanticContext): Semantic
 
 function processIdentifier(id: IdentifierExpr | NewExpr | SpecialMethodIdentifierExpr, context: SemanticContext, type: IdType = 'variable', modifiers: string[] = []): SemanticIdentifier {
 	const identifier = context.block.lookupOrCreateIdentifier(id, type, modifiers);
-	identifier.addToken(id.token);
+	identifier.addToken(id.token, context.filePath);
 	return identifier;
 }
 
@@ -1183,7 +1204,7 @@ function processMethod(stat: MethodStat, name: SemanticIdentifier, fields: Seman
 	};
 }
 
-function processClass(stat: ClassStat, context: SemanticContext): SemanticClass {
+function processClass(stat: ClassStat, name: SemanticIdentifier, context: SemanticContext): SemanticClass {
 	const annots = [];
 	if (stat.annots !== null) {
 		for (const annot of stat.annots) {
@@ -1192,7 +1213,7 @@ function processClass(stat: ClassStat, context: SemanticContext): SemanticClass 
 	}
 
 	let fields: SemanticField[] = [];
-	const name = processIdentifier(stat.name, context, 'class', []);
+
 	const sup = stat.super != null ? processExpression(stat.super, context) : undefined;
 	const statics = new Map<string, SemanticStatic>;
 	const methods = new Map<string, SemanticMethod>;
@@ -1241,7 +1262,13 @@ function processModule(module: Module, context: SemanticContext): SemanticModule
 	}
 	for (const stat of module.statements) {
 		if (stat.kind === 'ClassStat') {
-			classes.push(processClass(stat, context));
+			classes.push(
+				processClass(
+					stat,
+					processIdentifier(stat.name, context, 'class', []),
+					context.newBlock()
+				)
+			);
 		}
 	}
 	for (const stat of module.statements) {
@@ -1263,10 +1290,10 @@ function processModule(module: Module, context: SemanticContext): SemanticModule
 	return semanticModule;
 }
 
-export function generateSemanticTokens(module: Module): [SemanticModule, SemanticToken[]] {
-	const context = new SemanticContext();
-	const tokens: SemanticToken[] = [];
+export function generateSemanticTokens(filePath: string, analyzer: SemanticAnalyzer, module: Module): [SemanticContext, SemanticModule, SemanticToken[]] {
+	const context = new SemanticContext(analyzer, filePath);
+	const generator = new TokenGenerator(filePath);
 	const semanticModule = processModule(module, context);
-	generatTokensForModule(semanticModule, context, tokens);
-	return [semanticModule, tokens];
+	generatTokensForModule(semanticModule, context, generator);
+	return [context, semanticModule, generator.finalizeTokens()];
 }
