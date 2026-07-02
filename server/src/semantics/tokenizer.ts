@@ -95,7 +95,7 @@ export enum TokenKind {
 }
 
 export const zinniaTokenizer = buildLexer([
-	[true, /^'(\\'|[^'])*'/g, TokenKind.LITERAL_STRING],
+	[true, /^i?'(\\'|[^'])*'/g, TokenKind.LITERAL_STRING],
 	[true, /^\d+\.\d+/g, TokenKind.LITEARL_FLOAT],
 	[true, /^\d+/g, TokenKind.LITEARL_INTEGER],
 

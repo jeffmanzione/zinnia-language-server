@@ -1,6 +1,8 @@
 {
   "comments": {
-    "lineComment": ";",
+    "lineComment": {
+      "comment": ";"
+    },
     "blockComment": ["/*", "*/"]
   },
   "brackets": [
@@ -13,6 +15,7 @@
     { "open": "[", "close": "]", "notIn": ["string"]  },
     { "open": "(", "close": ")" , "notIn": ["string"] },
     { "open": "'", "close": "'", "notIn": ["string", "comment"] },
+    { "open": "i'", "close": "'", "notIn": ["string", "comment"] },
     { "open": "\"", "close": "\"", "notIn": ["string"] },
     { "open": "`", "close": "`", "notIn": ["string", "comment"] },
     { "open": "/*", "close": " */", "notIn": ["string"] }

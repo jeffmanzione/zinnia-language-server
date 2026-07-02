@@ -40,7 +40,8 @@ export class SemanticAnalyzer {
 		const libs = await fetchZinniaLibs();
 		for (const lib of libs) {
 			const info = this.parseDocument(lib);
-			this._libNamesToFilePaths.set(info.path.slice('/lib/'.length, info.path.length - '.zn'.length), info.path);
+			console.log(info.path.slice('/zinnia/lib/'.length, info.path.length - '.zn'.length));
+			this._libNamesToFilePaths.set(info.path.slice('/zinnia/lib/'.length, info.path.length - '.zn'.length), info.path);
 		}
 	}
 
@@ -119,8 +120,6 @@ export class SemanticAnalyzer {
 	}
 
 	searchBuiltinForId(id: string): SemanticIdentifier | undefined {
-		const result = this.builtin?.context.block.findIdentifier(id, false);
-		console.log(`Searching in builtin for '${id}=${result?.type ?? 'NOT_FOUND'}'`);
-		return result;
+		return this.builtin?.context.block.findIdentifier(id, false);
 	}
 }

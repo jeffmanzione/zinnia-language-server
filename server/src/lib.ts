@@ -3,7 +3,7 @@ import { DirEntry, DocParams } from './interfaces';
 const ZINNIA_GITHUB_REPO = 'jeffmanzione/zinnia';
 
 const _fetchLibPaths = async (): Promise<string[]> => {
-  const resp = await fetch(`https://api.github.com/repos/${ZINNIA_GITHUB_REPO}/contents/lib`);
+  const resp = await fetch(`https://api.github.com/repos/${ZINNIA_GITHUB_REPO}/contents/zinnia/lib`);
   const data = (await resp.json()) as DirEntry[];
 
   const libFilePaths: string[] = [];
