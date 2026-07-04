@@ -146,7 +146,7 @@
 			]
 		},
 		"string": {
-			"begin": "\\'",
+			"begin": "i?\\'",
 			"end": "(?<!\\\\)\\'",
 			"beginCaptures": {
 				"0": {

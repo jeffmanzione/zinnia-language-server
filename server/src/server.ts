@@ -1,29 +1,15 @@
 /* --------------------------------------------------------------------------------------------
  * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for license information.
- * ------------------------------------------------------------------------------------------ */
-import {
-	createConnection,
-	TextDocuments,
-	Diagnostic,
-	DiagnosticSeverity,
-	ProposedFeatures,
-	InitializeParams,
-	DidChangeConfigurationNotification,
-	CompletionItem,
-	CompletionItemKind,
-	TextDocumentPositionParams,
-	TextDocumentSyncKind,
-	InitializeResult,
-	DocumentDiagnosticReportKind,
-	type DocumentDiagnosticReport
-} from 'vscode-languageserver/node';
+ * Licensed under the MIT License. See License.txt in the project root for
+ * license information.
+ * ------------------------------------------------------------------------------------------
+ */
+import {createConnection, TextDocuments, Diagnostic, DiagnosticSeverity, ProposedFeatures, InitializeParams, DidChangeConfigurationNotification, CompletionItem, CompletionItemKind, TextDocumentPositionParams, TextDocumentSyncKind, InitializeResult, DocumentDiagnosticReportKind, type DocumentDiagnosticReport} from 'vscode-languageserver/node';
 
-import {
-	TextDocument
-} from 'vscode-languageserver-textdocument';
-import { SemanticAnalyzer } from './semantics/analyzer';
-import { DocParams } from './interfaces';
+import {TextDocument} from 'vscode-languageserver-textdocument';
+import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
+import {DocParams, HoverParams} from './interfaces';
+import {SemanticToken} from './semantics/semantic';
 
 const analyzer = new SemanticAnalyzer();
 
@@ -39,226 +25,240 @@ let hasWorkspaceFolderCapability = false;
 let hasDiagnosticRelatedInformationCapability = false;
 
 connection.onInitialize((params: InitializeParams) => {
-	const capabilities = params.capabilities;
+  const capabilities = params.capabilities;
 
-	// Does the client support the `workspace/configuration` request?
-	// If not, we fall back using global settings.
-	hasConfigurationCapability = capabilities.workspace?.configuration ?? false;
-	hasWorkspaceFolderCapability = capabilities.workspace?.workspaceFolders ?? false;
-	analyzer.init(params.workspaceFolders ?? []);
-	hasDiagnosticRelatedInformationCapability =
-		capabilities.textDocument?.publishDiagnostics?.relatedInformation ?? false;
+  // Does the client support the `workspace/configuration` request?
+  // If not, we fall back using global settings.
+  hasConfigurationCapability = capabilities.workspace?.configuration ?? false;
+  hasWorkspaceFolderCapability =
+      capabilities.workspace?.workspaceFolders ?? false;
+        analyzer.init(params.workspaceFolders ?? []);
+        hasDiagnosticRelatedInformationCapability =
+            capabilities.textDocument?.publishDiagnostics?.relatedInformation ??
+            false;
 
-	const result: InitializeResult = {
-		capabilities: {
-			textDocumentSync: TextDocumentSyncKind.Incremental,
-			// Tell the client that this server supports code completion.
-			completionProvider: {
-				resolveProvider: true
-			},
-			diagnosticProvider: {
-				interFileDependencies: false,
-				workspaceDiagnostics: false
-			}
-		}
-	};
-	if (hasWorkspaceFolderCapability) {
-		result.capabilities.workspace = {
-			workspaceFolders: {
-				supported: true
-			}
-		};
-	}
-	return result;
+        const result: InitializeResult = {
+          capabilities: {
+            textDocumentSync: TextDocumentSyncKind.Incremental,
+            // Tell the client that this server supports code completion.
+            completionProvider: {resolveProvider: true},
+            diagnosticProvider:
+                {interFileDependencies: false, workspaceDiagnostics: false}
+          }
+        };
+        if (hasWorkspaceFolderCapability) {
+          result.capabilities.workspace = {workspaceFolders: {supported: true}};
+        }
+        return result;
 });
 
 connection.onInitialized(() => {
-	if (hasConfigurationCapability) {
-		// Register for all configuration changes.
-		connection.client.register(DidChangeConfigurationNotification.type, undefined);
-	}
-	if (hasWorkspaceFolderCapability) {
-		connection.workspace.onDidChangeWorkspaceFolders(_ => {
-			connection.console.log('Workspace folder change event received.');
-		});
-	}
+  if (hasConfigurationCapability) {
+    // Register for all configuration changes.
+    connection.client.register(
+        DidChangeConfigurationNotification.type, undefined);
+  }
+  if (hasWorkspaceFolderCapability) {
+    connection.workspace.onDidChangeWorkspaceFolders(_ => {
+      connection.console.log('Workspace folder change event received.');
+    });
+  }
 });
 
 // The example settings
 interface ExampleSettings {
-	maxNumberOfProblems: number;
+  maxNumberOfProblems: number;
 }
 
-// The global settings, used when the `workspace/configuration` request is not supported by the client.
-// Please note that this is not the case when using this server with the client provided in this example
-// but could happen with other clients.
-const defaultSettings: ExampleSettings = { maxNumberOfProblems: 1000 };
+// The global settings, used when the `workspace/configuration` request is not
+// supported by the client. Please note that this is not the case when using
+// this server with the client provided in this example but could happen with
+// other clients.
+const defaultSettings: ExampleSettings = {
+  maxNumberOfProblems: 1000
+};
 let globalSettings: ExampleSettings = defaultSettings;
 
 // Cache the settings of all open documents
 const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map();
 
 connection.onDidChangeConfiguration(change => {
-	if (hasConfigurationCapability) {
-		// Reset all cached document settings
-		documentSettings.clear();
-	} else {
-		globalSettings = <ExampleSettings>(
-			(change.settings.languageServerExample || defaultSettings)
-		);
-	}
-	// Refresh the diagnostics since the `maxNumberOfProblems` could have changed.
-	// We could optimize things here and re-fetch the setting first can compare it
-	// to the existing setting, but this is out of scope for this example.
-	connection.languages.diagnostics.refresh();
+  if (hasConfigurationCapability) {
+    // Reset all cached document settings
+    documentSettings.clear();
+  } else {
+    globalSettings = <ExampleSettings>(
+        (change.settings.languageServerExample || defaultSettings));
+  }
+  // Refresh the diagnostics since the `maxNumberOfProblems` could have changed.
+  // We could optimize things here and re-fetch the setting first can compare it
+  // to the existing setting, but this is out of scope for this example.
+  connection.languages.diagnostics.refresh();
 });
 
 function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
-	if (!hasConfigurationCapability) {
-		return Promise.resolve(globalSettings);
-	}
-	let result = documentSettings.get(resource);
-	if (!result) {
-		result = connection.workspace.getConfiguration({
-			scopeUri: resource,
-			section: 'zinnia'
-		});
-		documentSettings.set(resource, result);
-	}
-	return result;
+  if (!hasConfigurationCapability) {
+    return Promise.resolve(globalSettings);
+  }
+  let result = documentSettings.get(resource);
+  if (!result) {
+    result = connection.workspace.getConfiguration(
+        {scopeUri: resource, section: 'zinnia'});
+    documentSettings.set(resource, result);
+  }
+  return result;
+}
+
+function _getTokenTypeName(token: SemanticToken): string {
+  return token.modifiers.includes('defaultLibrary') ?
+      'module' :
+      token.type === 'property' ? 'field' : token.type;
+}
+
+function _getTokenName(token: SemanticToken): string {
+  if (token.parentName) {
+    return `${token.parentName}.**${token.text}**`;
+  }
+  return token.text;
+}
+
+function getTokenHoverInfo(
+    token: SemanticToken, docInfo: SemanticDocInfo|undefined): any {
+  return [`${_getTokenTypeName(token)} ${_getTokenName(token)}`];
 }
 
 // Only keep settings for open documents
 documents.onDidClose(e => {
-	documentSettings.delete(e.document.uri);
+  documentSettings.delete(e.document.uri);
 });
 
 connection.onRequest(
-	'textDocument/semanticTokens/full',
-	async (params: DocParams) => analyzer.parseDocument(params).tokens
-);
+    'textDocument/semanticTokens/full',
+    async (params: DocParams) => (await analyzer.parseDocument(params)).tokens);
+
+connection.onRequest(
+    'textDocument/semanticTokens/hover', async (params: HoverParams) => {
+      console.log('Hover', params.uri, params.position);
+      const docInfo = analyzer.lookupDocInfoFromFile(params.uri);
+      const tokens = docInfo?.tokens ?? [];
+      for (const token of tokens) {
+        if (params.position.line == token.row &&
+            params.position.character >= token.col &&
+            params.position.character < (token.col + token.text.length)) {
+          return getTokenHoverInfo(token, docInfo);
+        }
+      }
+    });
+
 
 connection.languages.diagnostics.on(async (params) => {
-	const document = documents.get(params.textDocument.uri);
-	if (document !== undefined) {
-		return {
-			kind: DocumentDiagnosticReportKind.Full,
-			items: await validateTextDocument(document)
-		} satisfies DocumentDiagnosticReport;
-	} else {
-		// We don't know the document. We can either try to read it from disk
-		// or we don't report problems for it.
-		return {
-			kind: DocumentDiagnosticReportKind.Full,
-			items: []
-		} satisfies DocumentDiagnosticReport;
-	}
+  const document = documents.get(params.textDocument.uri);
+  if (document !== undefined) {
+    return {
+      kind: DocumentDiagnosticReportKind.Full,
+      items: await validateTextDocument(document)
+    } satisfies DocumentDiagnosticReport;
+  } else {
+    // We don't know the document. We can either try to read it from disk
+    // or we don't report problems for it.
+    return {
+      kind: DocumentDiagnosticReportKind.Full,
+      items: []
+    } satisfies DocumentDiagnosticReport;
+  }
 });
 
 // The content of a text document has changed. This event is emitted
 // when the text document first opened or when its content has changed.
 documents.onDidChangeContent(change => {
-	console.log('onDidChangeContent');
-	validateTextDocument(change.document);
+  console.log('onDidChangeContent');
+  validateTextDocument(change.document);
 });
 
-async function validateTextDocument(textDocument: TextDocument): Promise<Diagnostic[]> {
-	// In this simple example we get the settings for every validate run.
-	const settings = await getDocumentSettings(textDocument.uri);
+async function validateTextDocument(textDocument: TextDocument):
+    Promise<Diagnostic[]> {
+  // In this simple example we get the settings for every validate run.
+  const settings = await getDocumentSettings(textDocument.uri);
 
-	// The validator creates diagnostics for all uppercase words length 2 and more
-	const text = textDocument.getText();
-	const pattern = /\b[A-Z]{2,}\b/g;
-	let m: RegExpExecArray | null;
+  // The validator creates diagnostics for all uppercase words length 2 and more
+  // const text = textDocument.getText();
+  // const pattern = /\b[A-Z]{2,}\b/g;
+  // let m: RegExpExecArray | null;
 
-	let problems = 0;
-	const diagnostics: Diagnostic[] = [];
-	while ((m = pattern.exec(text)) != null && problems < settings.maxNumberOfProblems) {
-		problems++;
-		const diagnostic: Diagnostic = {
-			severity: DiagnosticSeverity.Warning,
-			range: {
-				start: textDocument.positionAt(m.index),
-				end: textDocument.positionAt(m.index + m[0].length)
-			},
-			message: `${m[0]} is all uppercase.`,
-			source: 'ex'
-		};
-		if (hasDiagnosticRelatedInformationCapability) {
-			diagnostic.relatedInformation = [
-				{
-					location: {
-						uri: textDocument.uri,
-						range: Object.assign({}, diagnostic.range)
-					},
-					message: 'Spelling matters'
-				},
-				{
-					location: {
-						uri: textDocument.uri,
-						range: Object.assign({}, diagnostic.range)
-					},
-					message: 'Particularly for names'
-				}
-			];
-		}
-		diagnostics.push(diagnostic);
-	}
-	return diagnostics;
+  // let problems = 0;
+  const diagnostics: Diagnostic[] = [];
+  // while ((m = pattern.exec(text)) != null && problems <
+  // settings.maxNumberOfProblems) { 	problems++; 	const diagnostic:
+  // Diagnostic = { 		severity: DiagnosticSeverity.Warning,
+  // range: { 			start:
+  // textDocument.positionAt(m.index), 			end:
+  // textDocument.positionAt(m.index + m[0].length)
+  // 		},
+  // 		message: `${m[0]} is all uppercase.`,
+  // 		source: 'ex'
+  // 	};
+  // 	if (hasDiagnosticRelatedInformationCapability) {
+  // 		diagnostic.relatedInformation = [
+  // 			{
+  // 				location: {
+  // 					uri: textDocument.uri,
+  // 					range: Object.assign({},
+  // diagnostic.range)
+  // 				},
+  // 				message: 'Spelling matters'
+  // 			},
+  // 			{
+  // 				location: {
+  // 					uri: textDocument.uri,
+  // 					range: Object.assign({},
+  // diagnostic.range)
+  // 				},
+  // 				message: 'Particularly for names'
+  // 			}
+  // 		];
+  // 	}
+  // 	diagnostics.push(diagnostic);
+  // }
+  return diagnostics;
 }
 
 connection.onDidChangeWatchedFiles(_change => {
-	// Monitored files have change in VSCode
-	connection.console.log('We received a file change event');
+  // Monitored files have change in VSCode
+  connection.console.log('We received a file change event');
 });
 
 // This handler provides the initial list of the completion items.
 connection.onCompletion(
-	(_textDocumentPosition: TextDocumentPositionParams): CompletionItem[] => {
-		// The pass parameter contains the position of the text document in
-		// which code complete got requested. For the example we ignore this
-		// info and always provide the same completion items.
-		if (_textDocumentPosition.position.character == 0) {
-			return [
-				{
-					label: 'import',
-					kind: CompletionItemKind.Text,
-					data: 1
-				},
-				{
-					label: 'class',
-					kind: CompletionItemKind.Text,
-					data: 2
-				},
-				{
-					label: 'def',
-					kind: CompletionItemKind.Text,
-					data: 3
-				}
-			];
-		} else {
-			return [];
-		}
-	}
-);
+    (_textDocumentPosition: TextDocumentPositionParams): CompletionItem[] => {
+      // The pass parameter contains the position of the text document in
+      // which code complete got requested. For the example we ignore this
+      // info and always provide the same completion items.
+      if (_textDocumentPosition.position.character == 0) {
+        return [
+          {label: 'import', kind: CompletionItemKind.Text, data: 1},
+          {label: 'class', kind: CompletionItemKind.Text, data: 2},
+          {label: 'def', kind: CompletionItemKind.Text, data: 3}
+        ];
+      } else {
+        return [];
+      }
+    });
 
 // This handler resolves additional information for the item selected in
 // the completion list.
-connection.onCompletionResolve(
-	(item: CompletionItem): CompletionItem => {
-		if (item.data === 1) {
-			item.detail = 'Module import';
-			item.documentation = 'Module import';
-		} else if (item.data === 2) {
-			item.detail = 'Class definition';
-			item.documentation = 'Class definition';
-		} else if (item.data === 3) {
-			item.detail = 'Function definition';
-			item.documentation = 'Function definition';
-		}
-		return item;
-	}
-);
+connection.onCompletionResolve((item: CompletionItem): CompletionItem => {
+  if (item.data === 1) {
+    item.detail = 'Module import';
+    item.documentation = 'Module import';
+  } else if (item.data === 2) {
+    item.detail = 'Class definition';
+    item.documentation = 'Class definition';
+  } else if (item.data === 3) {
+    item.detail = 'Function definition';
+    item.documentation = 'Function definition';
+  }
+  return item;
+});
 
 // Make the text document manager listen on the connection
 // for open, change and close text document events

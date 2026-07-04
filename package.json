@@ -14,7 +14,7 @@
 		"multi-root ready"
 	],
 	"engines": {
-		"vscode": "^1.75.0"
+		"vscode": "^1.127.0"
 	},
 	"activationEvents": [],
 	"main": "./client/out/extension",
@@ -72,15 +72,13 @@
 		"test": "sh ./scripts/e2e.sh"
 	},
 	"devDependencies": {
-		"@types/mocha": "^10.0.6",
-		"@types/node": "^18.14.6",
-		"@typescript-eslint/eslint-plugin": "^7.1.0",
-		"@typescript-eslint/parser": "^7.1.0",
-		"eslint": "^8.57.0",
-		"mocha": "^10.3.0"
+		"@types/node": "^26.1.0",
+		"@typescript-eslint/eslint-plugin": "^7.18.0",
+		"@typescript-eslint/parser": "^7.18.0",
+		"eslint": "^8.57.1"
 	},
 	"dependencies": {
-		"typescript": "^5.8.2",
+		"typescript": "^6.0.3",
 		"typescript-parsec": "^0.3.4",
 		"zinnia-language": "file:"
 	}

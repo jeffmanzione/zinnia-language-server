@@ -4,20 +4,21 @@
 	"author": "Microsoft Corporation",
 	"license": "MIT",
 	"version": "0.0.1",
-	"publisher": "vscode",
+	"publisher": "jeffmanzione",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
 	},
 	"engines": {
-		"vscode": "^1.75.0"
+		"vscode": "^1.127.0"
 	},
 	"dependencies": {
 		"typescript-parsec": "^0.3.4",
-		"vscode-languageclient": "^9.0.1",
+		"vscode-languageclient": "^10.1.0",
 		"zinnia-language-client": "file:"
 	},
 	"devDependencies": {
+		"@types/node": "^26.1.0",
 		"@types/vscode": "^1.125.0",
 		"@vscode/test-electron": "^2.3.9"
 	}
