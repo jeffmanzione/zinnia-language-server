@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "module": "nodenext",
+    "target": "esnext",
+    "lib": ["esnext", "dom"],
+    "types": ["node"],
+    "moduleResolution": "nodenext",
+    "sourceMap": true,
+    "strict": true,
+		"outDir": "out",
+		"rootDir": "src",
+    "composite": true,
+  },
+  "include": ["src"],
+}

@@ -3,7 +3,7 @@
 	"description": "Zinnia Lanugage Support",
 	"author": "Jeff Manzione",
 	"license": "MIT",
-	"version": "1.0.1",
+	"version": "1.0.2",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
@@ -17,7 +17,8 @@
 		"vscode": "^1.127.0"
 	},
 	"activationEvents": [],
-	"main": "./client/out/extension",
+	"main": "./packages/client/out/extension",
+	"workspaces": ["packages/*"],
 	"contributes": {
 		"languages": [
 			{
@@ -29,14 +30,14 @@
 				"extensions": [
 					".zn"
 				],
-				"configuration": "./language-configuration.json"
+				"configuration": "./packages/shared/src/language-configuration.json"
 			}
 		],
 		"grammars": [
 			{
 				"language": "zinnia",
 				"scopeName": "source.zn",
-				"path": "./client/src/zinnia.tmGrammar.json"
+				"path": "./packages/client/src/zinnia.tmGrammar.json"
 			}
 		],
 		"configuration": {
@@ -66,19 +67,15 @@
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "npx tsc -b",
-		"build": "npx vsce package",
-		"watch": "npx tsc -b -w",
-		"lint": "eslint ./client/src ./server/src --ext .ts,.tsx",
-		"postinstall": "cd client && npm install && cd ../server && npm install && cd .."
+		"build": "npx vsce package --follow-symlinks",
+		"watch": "npx tsc -b -w"
 	},
-	"vsce": {
-		"dependencies": false
+	"vsce": {},
+	"dependencies": {
+		"zinnia-language-shared": "file:../shared"
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.0",
-		"@typescript-eslint/eslint-plugin": "^7.18.0",
-		"@typescript-eslint/parser": "^7.18.0",
-		"eslint": "^8.57.1",
 		"typescript": "^6.0.3"
 	}
 }

@@ -1,11 +1,10 @@
 import {ExtensionContext, workspace} from 'vscode';
 import {LanguageClient, LanguageClientOptions, ServerOptions, TransportKind} from 'vscode-languageclient/node';
+import {SERVER_ENTRY_POINT_PATH, ZINNIA_DOCUMENT_SELECTOR, ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME} from 'zinnia-language-shared/constants';
 
-import {SERVER_ENTRY_POINT_PATH, ZINNIA_DOCUMENT_SELECTOR, ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME} from './constants';
 import {createDocumentTokensProvider as createDocumentTokensSubscription, createHoverSubscription} from './providers';
 
 let client: LanguageClient;
-
 const clientProvider = () => client;
 
 export function activate(context: ExtensionContext) {
@@ -29,7 +28,7 @@ export function activate(context: ExtensionContext) {
   };
 
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [ZINNIA_DOCUMENT_SELECTOR],
+    documentSelector: [ZINNIA_DOCUMENT_SELECTOR as any],
     synchronize: {
       // Notify the server about file changes to '.clientrc files contained in
       // the workspace

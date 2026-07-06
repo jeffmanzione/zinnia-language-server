@@ -1,10 +1,5 @@
 import {Position} from 'vscode-languageserver-textdocument';
-
-export interface DocParams {
-  text: string;
-  uri: string;
-  version: number;
-}
+import {SemanticTokensParams} from 'vscode-languageserver/node';
 
 export interface HoverParams {
   uri: string;
@@ -14,4 +9,8 @@ export interface HoverParams {
 export interface DirEntry {
   name: string;
   path: string;
+}
+
+export interface SemanticTokensParams2 extends SemanticTokensParams {
+  text?: string;
 }

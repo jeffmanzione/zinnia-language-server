@@ -1,15 +1,16 @@
 {
 	"compilerOptions": {
 		"target": "esnext",
-		"lib": ["ESNext", "DOM"],
+		"lib": ["esnext", "dom"],
 		"types": ["node"],
 		"module": "nodenext",
 		"moduleResolution": "nodenext",
 		"sourceMap": true,
 		"strict": true,
 		"outDir": "out",
-		"rootDir": "src"
+		"rootDir": "src",
+    "composite": true,
+		"paths": {"*": ["./src/*"]}
 	},
-	"include": ["src"],
-	"exclude": ["node_modules", ".vscode-test"]
+  "include": ["src"],
 }

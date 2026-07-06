@@ -9,14 +9,14 @@
 		"sourceMap": true
 	},
 	"include": [
-		"src"
+		"packages"
 	],
 	"exclude": [
-		"node_modules",
-		".vscode-test"
+		"node_modules"
 	],
 	"references": [
-		{ "path": "./client" },
-		{ "path": "./server" }
+		{ "path": "./packages/shared" },
+		{ "path": "./packages/client" },
+		{ "path": "./packages/server" }
 	]
 }

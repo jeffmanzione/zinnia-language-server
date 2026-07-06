@@ -106,6 +106,7 @@ function isOpExpr(expr: Expression): boolean {
 
 interface SemanticOp {
   ast: OpExpr;
+  tokens: Token[];
   exprs: SemanticExpression[];
 }
 
@@ -377,15 +378,15 @@ export class SemanticContext {
 }
 
 class TokenGenerator {
-  private readonly _tokens: SemanticToken[] = [];
+  private readonly tokens_: SemanticToken[] = [];
 
-  constructor(private readonly _filePath: string) {}
+  constructor(private readonly filePath_: string) {}
 
   createToken(
       token: Token,
       type: string,
       modifiers: string[] = [],
-      filePath = this._filePath,
+      filePath = this.filePath_,
       parentName?: string,
       ): SemanticToken {
     const semanticToken = {
@@ -397,7 +398,7 @@ class TokenGenerator {
       modifiers: modifiers,
       parentName: parentName,
     } satisfies SemanticToken;
-    this._tokens.push(semanticToken);
+    this.tokens_.push(semanticToken);
     return semanticToken;
   }
 
@@ -409,12 +410,12 @@ class TokenGenerator {
       col: token.pos.columnBegin - 1,
       row: token.pos.rowBegin - 1
     };
-    this._tokens.push(semanticToken);
+    this.tokens_.push(semanticToken);
     return semanticToken;
   }
 
   finalizeTokens(): SemanticToken[] {
-    return this._tokens.filter(tok => tok.filePath === this._filePath);
+    return this.tokens_.filter(tok => tok.filePath === this.filePath_);
   }
 }
 
@@ -565,7 +566,6 @@ function generateTokensForPostfix(
           nestedExpr as SemanticExpression, context, generator);
     }
   }
-  // console.log(pstfx);
 }
 
 function generateTokensForNamedArg(
@@ -612,6 +612,9 @@ function generateTokensForMap(
 
 function generateTokensForOp(
     op: SemanticOp, context: SemanticContext, generator: TokenGenerator) {
+  for (const tok of op.tokens) {
+    generator.createToken(tok, 'keyword');
+  }
   for (const expr of op.exprs) {
     if (expr != null) {
       generateTokensForExpression(expr, context, generator);
@@ -1010,7 +1013,11 @@ function processMap(map: MapExpr, context: SemanticContext): SemanticMap {
 }
 
 function processOp(expr: OpExpr, context: SemanticContext): SemanticOp {
-  return {ast: expr, exprs: expr.exprs.map(e => processExpression(e, context))};
+  return {
+    ast: expr,
+    tokens: expr.tokens,
+    exprs: expr.exprs.map(e => processExpression(e, context))
+  };
 }
 
 function processIs(expr: IsExpr, context: SemanticContext): SemanticIs {

@@ -1,14 +1,8 @@
-/* --------------------------------------------------------------------------------------------
- * Copyright (c) Microsoft Corporation. All rights reserved.
- * Licensed under the MIT License. See License.txt in the project root for
- * license information.
- * ------------------------------------------------------------------------------------------
- */
-import {createConnection, TextDocuments, Diagnostic, DiagnosticSeverity, ProposedFeatures, InitializeParams, DidChangeConfigurationNotification, CompletionItem, CompletionItemKind, TextDocumentPositionParams, TextDocumentSyncKind, InitializeResult, DocumentDiagnosticReportKind, type DocumentDiagnosticReport} from 'vscode-languageserver/node';
+import {createConnection, TextDocuments, Diagnostic, ProposedFeatures, InitializeParams, DidChangeConfigurationNotification, CompletionItem, CompletionItemKind, TextDocumentPositionParams, TextDocumentSyncKind, InitializeResult, DocumentDiagnosticReportKind, type DocumentDiagnosticReport} from 'vscode-languageserver/node';
 
 import {Position, TextDocument} from 'vscode-languageserver-textdocument';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
-import {DocParams, HoverParams} from './interfaces';
+import {HoverParams, SemanticTokensParams2} from './interfaces';
 import {SemanticToken} from './semantics/semantic';
 
 const analyzer = new SemanticAnalyzer();
@@ -39,11 +33,10 @@ connection.onInitialize((params: InitializeParams) => {
 
         const result: InitializeResult = {
           capabilities: {
-            textDocumentSync: TextDocumentSyncKind.Incremental,
-            // Tell the client that this server supports code completion.
+            textDocumentSync: TextDocumentSyncKind.Full,
             completionProvider: {resolveProvider: true},
             diagnosticProvider:
-                {interFileDependencies: false, workspaceDiagnostics: false}
+                {interFileDependencies: false, workspaceDiagnostics: false},
           }
         };
         if (hasWorkspaceFolderCapability) {
@@ -96,38 +89,38 @@ connection.onDidChangeConfiguration(change => {
   connection.languages.diagnostics.refresh();
 });
 
-function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
-  if (!hasConfigurationCapability) {
-    return Promise.resolve(globalSettings);
-  }
-  let result = documentSettings.get(resource);
-  if (!result) {
-    result = connection.workspace.getConfiguration(
-        {scopeUri: resource, section: 'zinnia'});
-    documentSettings.set(resource, result);
-  }
-  return result;
-}
+// function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
+//   if (!hasConfigurationCapability) {
+//     return Promise.resolve(globalSettings);
+//   }
+//   let result = documentSettings.get(resource);
+//   if (!result) {
+//     result = connection.workspace.getConfiguration(
+//         {scopeUri: resource, section: ZINNIA_LANGUAGE_ID});
+//     documentSettings.set(resource, result);
+//   }
+//   return result;
+// }
 
-function _getTokenTypeName(token: SemanticToken): string {
+function getTokenTypeName_(token: SemanticToken): string {
   return token.modifiers.includes('defaultLibrary') ?
       'module' :
       token.type === 'property' ? 'field' : token.type;
 }
 
-function _getTokenName(token: SemanticToken): string {
+function getTokenName_(token: SemanticToken): string {
   if (token.parentName) {
     return `${token.parentName}.**${token.text}**`;
   }
   return token.text;
 }
 
-function _getTokenHoverInfo(
+function getTokenHoverInfo_(
     token: SemanticToken, docInfo: SemanticDocInfo|undefined): any {
-  return [`${_getTokenTypeName(token)} ${_getTokenName(token)}`];
+  return [`${getTokenTypeName_(token)} ${getTokenName_(token)}`];
 }
 
-function _isOnToken(position: Position, token: SemanticToken): boolean {
+function isOnToken_(position: Position, token: SemanticToken): boolean {
   return position.line == token.row && position.character >= token.col &&
       position.character < (token.col + token.text.length);
 }
@@ -139,20 +132,24 @@ documents.onDidClose(e => {
 
 connection.onRequest(
     'textDocument/semanticTokens/full',
-    async (params: DocParams) => (await analyzer.parseDocument(params)).tokens);
+    async (params: SemanticTokensParams2) => {
+      console.log('textDocument/semanticTokens/full', params.textDocument.uri);
+      return (await analyzer.parseDocument(params)).tokens;
+    });
 
 connection.onRequest(
     'textDocument/semanticTokens/hover', async (params: HoverParams) => {
-      console.log('Hover', params.uri, params.position);
+      console.log(
+          'textDocument/semanticTokens/hover', params.uri, params.position);
       const docInfo = analyzer.lookupDocInfoFromFile(params.uri);
       const tokens = docInfo?.tokens ?? [];
       for (const token of tokens) {
-        if (_isOnToken(params.position, token)) {
-          return _getTokenHoverInfo(token, docInfo);
+        if (isOnToken_(params.position, token)) {
+          console.log(token);
+          return getTokenHoverInfo_(token, docInfo);
         }
       }
     });
-
 
 connection.languages.diagnostics.on(async (params) => {
   const document = documents.get(params.textDocument.uri);
@@ -180,8 +177,7 @@ documents.onDidChangeContent(change => {
 
 async function validateTextDocument(textDocument: TextDocument):
     Promise<Diagnostic[]> {
-  // In this simple example we get the settings for every validate run.
-  const settings = await getDocumentSettings(textDocument.uri);
+  // const settings = await getDocumentSettings(textDocument.uri);
 
   // The validator creates diagnostics for all uppercase words length 2 and more
   // const text = textDocument.getText();
@@ -189,7 +185,7 @@ async function validateTextDocument(textDocument: TextDocument):
   // let m: RegExpExecArray | null;
 
   // let problems = 0;
-  const diagnostics: Diagnostic[] = [];
+  // const diagnostics: Diagnostic[] = [];
   // while ((m = pattern.exec(text)) != null && problems <
   // settings.maxNumberOfProblems) { 	problems++; 	const diagnostic:
   // Diagnostic = { 		severity: DiagnosticSeverity.Warning,
@@ -222,7 +218,8 @@ async function validateTextDocument(textDocument: TextDocument):
   // 	}
   // 	diagnostics.push(diagnostic);
   // }
-  return diagnostics;
+  // return diagnostics;
+  return [];
 }
 
 connection.onDidChangeWatchedFiles(_change => {

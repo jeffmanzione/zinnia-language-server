@@ -2,7 +2,8 @@
 	"name": "zinnia-language-server",
 	"description": "Zinnia language server node.",
 	"version": "1.0.0",
-	"author": "Microsoft Corporation",
+	"author": "Jeff Manzione",
+	"publisher": "jeffmanzione",
 	"license": "MIT",
 	"engines": {
 		"node": "*"
