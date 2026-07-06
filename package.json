@@ -66,20 +66,19 @@
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "npx tsc -b",
+		"build": "npx vsce package",
 		"watch": "npx tsc -b -w",
 		"lint": "eslint ./client/src ./server/src --ext .ts,.tsx",
-		"postinstall": "cd client && npm install && cd ../server && npm install && cd ..",
-		"test": "sh ./scripts/e2e.sh"
+		"postinstall": "cd client && npm install && cd ../server && npm install && cd .."
+	},
+	"vsce": {
+		"dependencies": false
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.0",
 		"@typescript-eslint/eslint-plugin": "^7.18.0",
 		"@typescript-eslint/parser": "^7.18.0",
-		"eslint": "^8.57.1"
-	},
-	"dependencies": {
-		"typescript": "^6.0.3",
-		"typescript-parsec": "^0.3.4",
-		"zinnia-language": "file:"
+		"eslint": "^8.57.1",
+		"typescript": "^6.0.3"
 	}
 }

@@ -12,15 +12,12 @@
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
 	},
 	"dependencies": {
+		"typescript-parsec": "^0.3.4",
 		"vscode-languageserver": "^10.1.0",
 		"vscode-languageserver-textdocument": "^1.0.12",
-		"vscode-uri": "^3.1.0",
-		"zinnia-language-server": "file:"
+		"vscode-uri": "^3.1.0"
 	},
 	"scripts": {},
-	"vsce": {
-		"dependencies": false
-	},
 	"devDependencies": {
 		"@types/node": "^26.1.0"
 	}

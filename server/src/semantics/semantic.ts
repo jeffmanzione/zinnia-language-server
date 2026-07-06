@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
 
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
-import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
+import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
 import {TokenKind} from './tokenizer';
 
@@ -60,6 +60,11 @@ interface SemanticConstant {
   ast: ConstantExpr;
   text: string;
   value: boolean|number|null;
+}
+
+interface SemanticString {
+  ast: StringExpr;
+  text: string;
 }
 
 interface SemanticUnary {
@@ -143,10 +148,10 @@ interface SemanticAnnotation {
   params: SemanticExpression[];
 }
 
-type SemanticExpression =|SemanticConstant|SemanticIdentifier|SemanticUnary|
-    SemanticPostfix|SemanticAssign|SemanticTuple|SemanticArray|SemanticMap|
-    SemanticNamedArg|SemanticParens|SemanticOp|SemanticIs|SemanticIn|
-    SemanticCondition|SemanticRange|SemanticAnon;
+type SemanticExpression =|SemanticConstant|SemanticString|SemanticIdentifier|
+    SemanticUnary|SemanticPostfix|SemanticAssign|SemanticTuple|SemanticArray|
+    SemanticMap|SemanticNamedArg|SemanticParens|SemanticOp|SemanticIs|
+    SemanticIn|SemanticCondition|SemanticRange|SemanticAnon;
 
 interface SemanticAssignLhs {
   ast: AssignLhsExpr;
@@ -425,6 +430,13 @@ function generateTokensForConstant(
   }
 }
 
+
+function generateTokensForString(
+    strng: SemanticString, context: SemanticContext,
+    generator: TokenGenerator): void {
+  generator.createToken(strng.ast.token, 'string', ['constant']);
+}
+
 function generateTokensForUnary(
     unary: SemanticUnary, context: SemanticContext,
     generator: TokenGenerator): void {
@@ -437,8 +449,8 @@ function generateTokensForUnary(
 }
 
 function selectIdType(id: SemanticIdentifier, token: Token): IdType {
-  if (id.type === 'class' || id.type === 'method' ||
-      token.next?.kind !== TokenKind.SYMBOL_LPAREN) {
+  if (id.type === 'class' || id.type === 'method' || id.type === 'property' ||
+      id.type === 'parameter' || token.next?.kind !== TokenKind.SYMBOL_LPAREN) {
     return id.type;
   }
   return 'function';
@@ -673,6 +685,8 @@ function generateTokensForExpression(
   }
   if (isConstantExpr(expr.ast)) {
     generateTokensForConstant(expr as SemanticConstant, context, generator);
+  } else if (expr.ast.kind === 'StringExpr') {
+    generateTokensForString(expr as SemanticString, context, generator);
   } else if (expr.ast.kind === 'IdentifierExpr') {
     generateTokensForIdentifier(expr as SemanticIdentifier, context, generator);
   } else if (expr.ast.kind === 'UnaryChainExpr') {
@@ -1062,6 +1076,8 @@ function processExpression(
     context: SemanticContext): SemanticExpression {
   if (isConstantExpr(expr)) {
     return processConstant(expr as ConstantExpr, context);
+  } else if (expr.kind === 'StringExpr') {
+    return processString(expr, context);
   } else if (expr.kind === 'IdentifierExpr') {
     return processIdentifier(expr, context);
   } else if (expr.kind === 'UnaryChainExpr') {
@@ -1112,6 +1128,12 @@ function processConstant(
         null :
         expr.kind === 'BoolExpr' ? /^True$/.test(text) : +text
   };
+}
+
+
+function processString(
+    expr: StringExpr, context: SemanticContext): SemanticString {
+  return {ast: expr, text: expr.text};
 }
 
 function processAssignLhs(

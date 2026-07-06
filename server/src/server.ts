@@ -6,7 +6,7 @@
  */
 import {createConnection, TextDocuments, Diagnostic, DiagnosticSeverity, ProposedFeatures, InitializeParams, DidChangeConfigurationNotification, CompletionItem, CompletionItemKind, TextDocumentPositionParams, TextDocumentSyncKind, InitializeResult, DocumentDiagnosticReportKind, type DocumentDiagnosticReport} from 'vscode-languageserver/node';
 
-import {TextDocument} from 'vscode-languageserver-textdocument';
+import {Position, TextDocument} from 'vscode-languageserver-textdocument';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {DocParams, HoverParams} from './interfaces';
 import {SemanticToken} from './semantics/semantic';
@@ -122,9 +122,14 @@ function _getTokenName(token: SemanticToken): string {
   return token.text;
 }
 
-function getTokenHoverInfo(
+function _getTokenHoverInfo(
     token: SemanticToken, docInfo: SemanticDocInfo|undefined): any {
   return [`${_getTokenTypeName(token)} ${_getTokenName(token)}`];
+}
+
+function _isOnToken(position: Position, token: SemanticToken): boolean {
+  return position.line == token.row && position.character >= token.col &&
+      position.character < (token.col + token.text.length);
 }
 
 // Only keep settings for open documents
@@ -142,10 +147,8 @@ connection.onRequest(
       const docInfo = analyzer.lookupDocInfoFromFile(params.uri);
       const tokens = docInfo?.tokens ?? [];
       for (const token of tokens) {
-        if (params.position.line == token.row &&
-            params.position.character >= token.col &&
-            params.position.character < (token.col + token.text.length)) {
-          return getTokenHoverInfo(token, docInfo);
+        if (_isOnToken(params.position, token)) {
+          return _getTokenHoverInfo(token, docInfo);
         }
       }
     });

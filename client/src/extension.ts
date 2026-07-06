@@ -1,81 +1,35 @@
-import * as path from 'path';
-import {CancellationToken, DocumentSemanticTokensProvider, ExtensionContext, Hover, languages, Position, SemanticTokens, SemanticTokensBuilder, SemanticTokensLegend, TextDocument, workspace} from 'vscode';
+import {ExtensionContext, workspace} from 'vscode';
 import {LanguageClient, LanguageClientOptions, ServerOptions, TransportKind} from 'vscode-languageclient/node';
 
-
-interface SemanticToken {
-  text: string;
-  col: number;
-  row: number;
-  type: string;
-  modifiers: string[];
-}
+import {SERVER_ENTRY_POINT_PATH, ZINNIA_DOCUMENT_SELECTOR, ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME} from './constants';
+import {createDocumentTokensProvider as createDocumentTokensSubscription, createHoverSubscription} from './providers';
 
 let client: LanguageClient;
 
-const tokenTypes = new Map<string, number>();
-const tokenModifiers = new Map<string, number>();
-
-const legend = (function() {
-  const tokenTypesLegend = [
-    'comment',   'string',    'keyword',       'number',    'regexp',
-    'operator',  'namespace', 'type',          'struct',    'class',
-    'interface', 'enum',      'typeParameter', 'function',  'method',
-    'decorator', 'macro',     'variable',      'parameter', 'property',
-    'label'
-  ];
-  tokenTypesLegend.forEach(
-      (tokenType, index) => tokenTypes.set(tokenType, index));
-
-  const tokenModifiersLegend = [
-    'declaration', 'defaultLibrary', 'documentation', 'readonly', 'static',
-    'abstract', 'deprecated', 'modification', 'async', 'local'
-  ];
-  tokenModifiersLegend.forEach(
-      (tokenModifier, index) => tokenModifiers.set(tokenModifier, index));
-
-  return new SemanticTokensLegend(tokenTypesLegend, tokenModifiersLegend);
-})();
+const clientProvider = () => client;
 
 export function activate(context: ExtensionContext) {
-  // The server is implemented in node
-  const serverModule =
-      context.asAbsolutePath(path.join('server', 'out', 'server.js'));
+  context.subscriptions.push(
+      createDocumentTokensSubscription(clientProvider),
+      createHoverSubscription(clientProvider),
+  );
 
-  context.subscriptions.push(languages.registerDocumentSemanticTokensProvider(
-      {scheme: 'file', language: 'zinnia', pattern: '**/*.zn'},
-      new ZinniaDocumentSemanticTokensProvider(), legend));
-
-
-  context.subscriptions.push(languages.registerHoverProvider('zinnia', {
-    async provideHover(document, position, _) {
-      const hoverContents: string[] =
-          await client.sendRequest('textDocument/semanticTokens/hover', {
-            uri: document.uri.fsPath,
-            version: document.version,
-            position: position
-          });
-      return {contents: hoverContents} as Hover;
-    }
-  }));
-
-
-
+  const serverEntryPoint = context.asAbsolutePath(SERVER_ENTRY_POINT_PATH);
   // If the extension is launched in debug mode then the debug server options
   // are used Otherwise the run options are used
   const serverOptions: ServerOptions = {
-    run: {module: serverModule, transport: TransportKind.ipc},
+    run: {
+      module: serverEntryPoint,
+      transport: TransportKind.ipc,
+    },
     debug: {
-      module: serverModule,
+      module: serverEntryPoint,
       transport: TransportKind.ipc,
     }
   };
 
-  // Options to control the language client
   const clientOptions: LanguageClientOptions = {
-    // Register the server for plain text documents
-    documentSelector:
-        [{scheme: 'file', language: 'zinnia', pattern: '**/*.zn'}],
+    documentSelector: [ZINNIA_DOCUMENT_SELECTOR],
     synchronize: {
       // Notify the server about file changes to '.clientrc files contained in
       // the workspace
@@ -84,7 +38,8 @@ export function activate(context: ExtensionContext) {
   };
 
   // Create the language client and start the client.
-  client = new LanguageClient('zinnia', 'Zinnia', serverOptions, clientOptions);
+  client = new LanguageClient(
+      ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME, serverOptions, clientOptions);
 
   // Start the client. This will also launch the server
   client.start();
@@ -95,63 +50,4 @@ export function deactivate(): Thenable<void>|undefined {
     return undefined;
   }
   return client.stop();
-}
-
-class ZinniaDocumentSemanticTokensProvider implements
-    DocumentSemanticTokensProvider {
-  async provideDocumentSemanticTokens(
-      document: TextDocument,
-      token: CancellationToken): Promise<SemanticTokens> {
-    const allTokens = await this._parseText(document);
-    const builder = new SemanticTokensBuilder();
-    allTokens.forEach((token) => {
-      builder.push(
-          token.row, token.col, token.text.length,
-          this._encodeTokenType(token.type),
-          this._encodeTokenModifiers(token.modifiers));
-    });
-    return builder.build();
-  }
-
-  private _encodeTokenType(tokenType: string): number {
-    if (tokenTypes.has(tokenType)) {
-      return tokenTypes.get(tokenType)!;
-    } else if (tokenType === 'notInLegend') {
-      return tokenTypes.size + 2;
-    }
-    return 0;
-  }
-
-  private _encodeTokenModifiers(strTokenModifiers: string[]): number {
-    let result = 0;
-    for (const element of strTokenModifiers) {
-      const tokenModifier = element;
-      if (tokenModifiers.has(tokenModifier)) {
-        result = result | (1 << tokenModifiers.get(tokenModifier)!);
-      } else if (tokenModifier === 'notInLegend') {
-        result = result | (1 << tokenModifiers.size + 2);
-      }
-    }
-    return result;
-  }
-
-  private _parseText(document: TextDocument): Promise<SemanticToken[]> {
-    return client.sendRequest('textDocument/semanticTokens/full', {
-      text: document.getText(),
-      uri: document.uri.fsPath,
-      version: document.version
-    } satisfies DocParams);
-  }
-}
-
-interface DocParams {
-  text: string;
-  uri: string;
-  version: number;
-}
-
-interface HoverParams {
-  uri: string;
-  position: Position;
-  version: number;
 }
