@@ -56,7 +56,7 @@ export class SemanticAnalyzer {
         const info = this.parseDocumentText_(lib.uri, lib.text);
         this.libNamesToFilePaths_.set(
             info.path.slice(
-                '/zinnia/lib/'.length, info.path.length - '.zn'.length),
+                'zinnia/lib/'.length, info.path.length - '.zn'.length),
             info.path);
       }
       this.initResolve_!();
