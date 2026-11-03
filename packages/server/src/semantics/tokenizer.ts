@@ -276,3 +276,9 @@ export function tokenize(text: string): Token[] {
   }
   return tokens;
 }
+// Whether [name] is a keyword, such as 'class' or 'True'.
+export function isKeyword(name: string): boolean {
+  const tokens = tokenize(name);
+  return tokens.length === 1 && tokens[0].text === name &&
+      TokenKind[tokens[0].kind].startsWith('KEYWORD_');
+}

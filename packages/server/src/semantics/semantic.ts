@@ -20,7 +20,7 @@ export interface SemanticToken {
 type IdType =
     |'variable'|'property'|'parameter'|'function'|'method'|'class'|'decorator';
 
-interface TokenFile {
+export interface TokenFile {
   token: Token;
   filePath: string;
 }
@@ -42,6 +42,8 @@ export class SemanticIdentifier {
   // For a module member defined as another name, e.g. `self.sort =
   // builtin_ext.sort`: that name, and the module it's in if not this one.
   aliasOf?: {module?: string, name: string};
+  // For the name an import defines: the module it imports, as written.
+  importSource?: {name: string, isPath: boolean};
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -72,7 +74,7 @@ export interface Signature {
 }
 
 // Follows an identifier's forward to the identifier it was resolved to.
-function resolved(id: SemanticIdentifier): SemanticIdentifier {
+export function resolved(id: SemanticIdentifier): SemanticIdentifier {
   while (id.forward !== undefined) {
     id = id.forward;
   }
@@ -571,6 +573,13 @@ export class SemanticContext {
     return this.analyzer.lookupDocInfoFromModuleName(moduleName) ?? null;
   }
 
+  // The analysis of the module an import in this file names, if it has been
+  // analyzed.
+  lookupImportedDocInfo(source: {name: string, isPath: boolean}):
+      SemanticDocInfo|undefined {
+    return this.analyzer.analyzedImport(this.filePath, source.name, source.isPath);
+  }
+
   newBlock(
       kind: BlockKind = 'block',
       options: {inheritsUnknownMembers?: boolean, inMethod?: boolean} = {}):
@@ -732,6 +741,10 @@ function generateTokensForAnnotation(
 
 function lookupMemberFromPossibleModule(
     possibleModule: SemanticIdentifier, tok: Token, context: SemanticContext) {
+  if (possibleModule?.importSource !== undefined) {
+    return context.lookupImportedDocInfo(possibleModule.importSource)
+        ?.context?.block.findIdentifier(tok.text);
+  }
   if (possibleModule && possibleModule.type === 'variable' &&
       possibleModule.modifiers.includes('defaultLibrary')) {
     return context.lookupDocInfo(possibleModule.id)
@@ -1548,6 +1561,18 @@ function processStatement(
 }
 
 function createImportName(
+    stat: ImportStat, context: SemanticContext): SemanticIdentifier {
+  const id = createImportName_(stat, context);
+  const isPath = stat.source.kind === 'StringExpr';
+  id.importSource = {
+    name: isPath ? stat.source.token.text.replace(/^i?'|'$/g, '') :
+                   stat.source.token.text,
+    isPath: isPath,
+  };
+  return id;
+}
+
+function createImportName_(
     stat: ImportStat, context: SemanticContext): SemanticIdentifier {
   let name: string;
   if (stat.name == null) {

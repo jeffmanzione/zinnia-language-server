@@ -126,6 +126,25 @@ export class SemanticAnalyzer {
     return undefined;
   }
 
+  // Returns the analysis of the module [name] that the file at [fromPath]
+  // imports, if that module has already been analyzed. [isPath] is whether
+  // the import names it with a path.
+  analyzedImport(fromPath: string, name: string, isPath: boolean):
+      SemanticDocInfo|undefined {
+    const libPath = isPath ? undefined : this.libNamesToFilePaths_.get(name);
+    if (libPath !== undefined) {
+      return this.docs_.get(libPath);
+    }
+    for (const dir of [...this.workspacePaths_, path.dirname(fromPath)]) {
+      const info =
+          this.docs_.get(path.join(dir, name + '.zn').replace(/\\/g, '/'));
+      if (info !== undefined) {
+        return info;
+      }
+    }
+    return undefined;
+  }
+
   async lookupModule(moduleName: string): Promise<SemanticModule|null> {
     return (await this.lookupSemanticDocInfo_(moduleName))?.module ?? null;
   }
@@ -246,6 +265,11 @@ export class SemanticAnalyzer {
     return match !== null &&
         (this.libNamesToFilePaths_.size === 0 ||
          this.libNamesToFilePaths_.has(match[1]));
+  }
+
+  // The documents analyzed so far, including the standard library's.
+  analyzedDocuments(): IterableIterator<SemanticDocInfo> {
+    return this.docs_.values();
   }
 
   lookupDocInfoFromFile(filePath: string): SemanticDocInfo|undefined {

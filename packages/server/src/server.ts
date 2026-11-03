@@ -1,4 +1,4 @@
-import {CompletionItem, CompletionItemKind, createConnection, Definition, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CompletionItem, CompletionItemKind, createConnection, Definition, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
@@ -9,7 +9,8 @@ import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
 import {NATIVE_FUNCTIONS, NATIVE_METHODS} from './semantics/natives';
 import {SemanticClass, SemanticToken} from './semantics/semantic';
-import {documentSymbols} from './symbols';
+import {invalidName, renameLocations, renameTarget} from './rename';
+import {documentSymbols, workspaceSymbols} from './symbols';
 
 const KEYWORDS = [
   'and',    'as',     'async',  'await',  'break', 'catch',  'class',
@@ -58,7 +59,10 @@ function isOnToken(position: Position, token: SemanticToken): boolean {
 
 function tokenAt(info: SemanticDocInfo, position: Position): SemanticToken|
     undefined {
-  return info.tokens.find(token => isOnToken(position, token));
+  // Prefer a token that refers to an identifier: `self.x = ...` has one for
+  // the module member and one for the member access.
+  const tokens = info.tokens.filter(token => isOnToken(position, token));
+  return tokens.find(token => token.identifier !== undefined) ?? tokens[0];
 }
 
 function locationOf(filePath: string, row: number, col: number, length: number):
@@ -155,6 +159,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       definitionProvider: true,
       referencesProvider: true,
       documentSymbolProvider: true,
+      workspaceSymbolProvider: true,
+      renameProvider: {prepareProvider: true},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
     },
@@ -406,6 +412,71 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
     activeParameter: Math.min(
         call!.argIndex, Math.max(0, (signature.parameters?.length ?? 1) - 1)),
   };
+});
+
+connection.onPrepareRename(async (params): Promise<PrepareRenameResult|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const target = renameTarget(info && tokenAt(info, params.position), analyzer);
+  if ('error' in target) {
+    throw new ResponseError(ErrorCodes.InvalidRequest, target.error);
+  }
+  return {
+    range: {
+      start: {line: target.token.row, character: target.token.col},
+      end: {
+        line: target.token.row,
+        character: target.token.col + target.token.text.length,
+      },
+    },
+    placeholder: target.id.id,
+  };
+});
+
+connection.onRenameRequest(async (params): Promise<WorkspaceEdit|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const target = renameTarget(info && tokenAt(info, params.position), analyzer);
+  if ('error' in target) {
+    throw new ResponseError(ErrorCodes.InvalidRequest, target.error);
+  }
+  const error = invalidName(params.newName);
+  if (error !== undefined) {
+    throw new ResponseError(ErrorCodes.InvalidParams, error);
+  }
+  const changes: Record<string, TextEdit[]> = {};
+  for (const loc of renameLocations(target, analyzer.analyzedDocuments())) {
+    const location = locationOf(loc.filePath, loc.row, loc.col, loc.length);
+    if (location !== undefined) {
+      (changes[location.uri] ??= [])
+          .push({range: location.range, newText: params.newName});
+    }
+  }
+  return {changes: changes};
+});
+
+connection.onWorkspaceSymbol(async (params): Promise<WorkspaceSymbol[]> => {
+  const symbols: WorkspaceSymbol[] = [];
+  for (const doc of analyzer.analyzedDocuments()) {
+    if (doc.module === undefined || analyzer.isStandardLibraryFile(doc.path)) {
+      continue;
+    }
+    for (const {filePath, symbol, containerName} of workspaceSymbols(
+             doc.path, doc.module.ast, params.query)) {
+      const location = locationOf(
+          filePath, symbol.selectionRange.start.line,
+          symbol.selectionRange.start.character,
+          symbol.selectionRange.end.character -
+              symbol.selectionRange.start.character);
+      if (location !== undefined) {
+        symbols.push({
+          name: symbol.name,
+          kind: symbol.kind,
+          location: location,
+          containerName: containerName,
+        });
+      }
+    }
+  }
+  return symbols;
 });
 
 documents.listen(connection);
