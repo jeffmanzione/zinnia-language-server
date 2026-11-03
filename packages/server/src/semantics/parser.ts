@@ -13,12 +13,16 @@ import {AddExpr, AndExpr, AnnotationExpr, AnonExpr, ArrayExpr, ArrayIndexExpr, A
 import {ClassMemberStat, ClassStat, CompoundStat, ExitStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, IterStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
 import {Token, TokenKind, tokenize} from './tokenizer';
 
-// A problem found while parsing. Rows and columns are 0-based. A problem with
-// no position is at the end of the document.
+// A problem found in a document. Rows and columns are 0-based. A problem with
+// no position is at the end of the document. Problems are errors unless they
+// say otherwise.
 export interface ParseProblem {
   message: string;
   row?: number;
   col?: number;
+  // How many characters the problem spans, if more than one.
+  length?: number;
+  severity?: 'error'|'warning';
 }
 
 export interface ParseResult {

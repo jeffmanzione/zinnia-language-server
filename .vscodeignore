@@ -8,5 +8,5 @@ tsconfig.tsbuildinfo
 node_modules/**
 !node_modules/vscode-*/**
 !node_modules/{minimatch,brace-expansion,concat-map,balanced-match}/**
-!node_modules/{semver,lru-cache,yallist,typescript-parsec}/**
+!node_modules/{semver,lru-cache,yallist}/**
 !node_modules/zinnia-language-*/**

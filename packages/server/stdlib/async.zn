@@ -1,0 +1,132 @@
+import classes
+import error
+import io
+
+; Returns a future that completes in at least [duration_sec] seconds.
+function sleep(duration_sec) {
+  __sleep(duration_sec)
+}
+
+; Returns a newly-spawned isolate that executes [fn] with arguments [args].
+;
+; An isolate runs on its own thread with its own heap; [args] are deep-copied
+; into it. Call start() on the result to run it, which returns a future to the
+; result of [fn]. If [keep_alive] is True, the isolate keeps running after [fn]
+; returns so that it can serve actor calls (see spawn_actor()).
+function spawn_isolate({fn, args=None, keep_alive=False}) {
+  __spawn_isolate(fn, args, keep_alive)
+}
+
+; Returns a proxy to a new instance of [cls], constructed with [args], that
+; lives in a newly-spawned isolate.
+;
+; Calls to the proxy return a future to the result of calling the method on
+; the actual instance in the spawned isolate.
+;
+; Throws an error if [cls] is not annotated with [Actor].
+;
+; Example:
+; ```
+; @async.Actor
+; class Test {
+;   new(field n) {}
+;   method mult_n(num) num * n
+; }
+; test = async.spawn_actor(Test, 5)
+; io.println(await test.mult_n(6)) /* Prints '30\n' */
+; ```
+function spawn_actor(cls, args=None) {
+  proxy_class = _get_proxy_class(cls)
+  isolate = spawn_isolate(
+      fn: (cls, args) -> cls(args),
+      args: (cls, args),
+      keep_alive: True)
+  return proxy_class(await isolate.start())
+}
+
+; Represents the state of an asynchronous piece of work.
+class Future {
+  ; Returns a future to the value of the result of this future with [fn]
+  ; applied.
+  method then(fn) async {
+    return fn(await self)
+  }
+  method then_async(fn) async {
+    return await fn(await self)
+  }
+}
+
+; Allows for the manual completion of a future.
+;
+; Example:
+; ```
+; do_something = (c) async -> c.complete('Hello')
+; completer = async.Completer()
+; do_something(completer)
+; io.println(await completer.as_future())
+; ```
+class Completer {
+  field completed, _future
+
+  new() {
+    completed = False
+    _future = __completer_future()
+  }
+
+  ; Completes the future with the value [v], resuming anything awaiting it.
+  ;
+  ; Raises an error if the completer was already completed.
+  method complete(v=None) {
+    __complete_future(_future, v)
+    completed = True
+  }
+
+  ; Returns the future, which completes when complete() is called.
+  method as_future() {
+    return _future
+  }
+}
+
+; Returns a future that completes when all futures in [futures] complete.
+function all(futures) async {
+  futures.map((f) -> await f)
+}
+
+; Makes a class usable as an actor with spawn_actor().
+;
+; Generates a proxy class named [cls.name() + 'Proxy'] whose methods send calls
+; to an instance of [cls] in another isolate and return futures to the results.
+; The proxy's target() returns the underlying ActorRef.
+class Actor {
+  method annotate(cls) {
+    proxy_class = classes.factory.create_class(
+        cat(cls.name(), 'Proxy'),
+        cls.module())
+    proxy_class.get_constructor().with_parameter('actor_ref', True)
+    cls.methods().each((m) {
+      method_name = m.name()
+      if method_name == 'new' {
+        return
+      }
+      proxy_class.add_method(method_name)
+          .with_parameter('args')
+          .with_statement(cat(
+              'return async.__actor_call(actor_ref, i\'',
+              method_name,
+              '\', args)'))
+    })
+    proxy_class.add_method('target')
+        .with_statement('return actor_ref')
+    return proxy_class.build()
+  }
+}
+
+function _get_proxy_class(cls) {
+  proxy_class = cls.module().$get(cls.name() + 'Proxy')
+  if ~proxy_class {
+    raise error.Error(cat(
+        'Could not find proxy class for ', cls.name(),
+        '. Is it annotated with @async.Actor?'))
+  }
+  return proxy_class
+}
