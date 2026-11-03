@@ -1,268 +1,238 @@
-import {createConnection, TextDocuments, Diagnostic, ProposedFeatures, InitializeParams, DidChangeConfigurationNotification, CompletionItem, CompletionItemKind, TextDocumentPositionParams, TextDocumentSyncKind, InitializeResult, DocumentDiagnosticReportKind, type DocumentDiagnosticReport} from 'vscode-languageserver/node';
+import {CompletionItem, CompletionItemKind, createConnection, Definition, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {TextDocument} from 'vscode-languageserver-textdocument';
+import {URI} from 'vscode-uri';
+import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
-import {Position, TextDocument} from 'vscode-languageserver-textdocument';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
-import {HoverParams, SemanticTokensParams2} from './interfaces';
 import {SemanticToken} from './semantics/semantic';
+import {documentSymbols} from './symbols';
+
+const KEYWORDS = [
+  'and',    'as',     'async',  'await',  'break', 'catch',  'class',
+  'const',  'continue', 'else', 'exit',   'False', 'field',  'for',
+  'function', 'if',   'import', 'in',     'is',    'method', 'new',
+  'None',   'notin',  'or',     'raise',  'return', 'static', 'then',
+  'True',   'try',    'while',
+];
 
 const analyzer = new SemanticAnalyzer();
 
-// Create a connection for the server, using Node's IPC as a transport.
-// Also include all preview / proposed LSP features.
+// Creates a connection using whichever transport the client asked for
+// (--node-ipc, --stdio or --socket), so editors other than VS Code can use the
+// server too.
 const connection = createConnection(ProposedFeatures.all);
 
-// Create a simple text document manager.
 const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
-let hasConfigurationCapability = false;
-let hasWorkspaceFolderCapability = false;
-let hasDiagnosticRelatedInformationCapability = false;
+// The latest analysis of each open document, keyed by URI.
+const analyses = new Map<string, {version: number, info: Promise<SemanticDocInfo>}>();
 
-connection.onInitialize((params: InitializeParams) => {
-  const capabilities = params.capabilities;
+const tokenTypeIndices = new Map(ZINNIA_TOKEN_TYPES.map((t, i) => [t, i]));
+const tokenModifierBits =
+    new Map(ZINNIA_TOKEN_MODIFIERS.map((m, i) => [m, 1 << i]));
 
-  // Does the client support the `workspace/configuration` request?
-  // If not, we fall back using global settings.
-  hasConfigurationCapability = capabilities.workspace?.configuration ?? false;
-  hasWorkspaceFolderCapability =
-      capabilities.workspace?.workspaceFolders ?? false;
-        analyzer.init(params.workspaceFolders ?? []);
-        hasDiagnosticRelatedInformationCapability =
-            capabilities.textDocument?.publishDiagnostics?.relatedInformation ??
-            false;
-
-        const result: InitializeResult = {
-          capabilities: {
-            textDocumentSync: TextDocumentSyncKind.Full,
-            completionProvider: {resolveProvider: true},
-            diagnosticProvider:
-                {interFileDependencies: false, workspaceDiagnostics: false},
-          }
-        };
-        if (hasWorkspaceFolderCapability) {
-          result.capabilities.workspace = {workspaceFolders: {supported: true}};
-        }
-        return result;
-});
-
-connection.onInitialized(() => {
-  if (hasConfigurationCapability) {
-    // Register for all configuration changes.
-    connection.client.register(
-        DidChangeConfigurationNotification.type, undefined);
+function analyze(document: TextDocument): Promise<SemanticDocInfo> {
+  const cached = analyses.get(document.uri);
+  if (cached !== undefined && cached.version === document.version) {
+    return cached.info;
   }
-  if (hasWorkspaceFolderCapability) {
-    connection.workspace.onDidChangeWorkspaceFolders(_ => {
-      connection.console.log('Workspace folder change event received.');
-    });
-  }
-});
-
-// The example settings
-interface ExampleSettings {
-  maxNumberOfProblems: number;
+  const info = analyzer.parseDocument(
+      {textDocument: {uri: document.uri}, text: document.getText()});
+  analyses.set(document.uri, {version: document.version, info: info});
+  return info;
 }
 
-// The global settings, used when the `workspace/configuration` request is not
-// supported by the client. Please note that this is not the case when using
-// this server with the client provided in this example but could happen with
-// other clients.
-const defaultSettings: ExampleSettings = {
-  maxNumberOfProblems: 1000
+async function analysisFor(uri: string): Promise<SemanticDocInfo|undefined> {
+  const document = documents.get(uri);
+  return document === undefined ? undefined : analyze(document);
+}
+
+function isOnToken(position: Position, token: SemanticToken): boolean {
+  return position.line === token.row && position.character >= token.col &&
+      position.character < token.col + token.text.length;
+}
+
+function tokenAt(info: SemanticDocInfo, position: Position): SemanticToken|
+    undefined {
+  return info.tokens.find(token => isOnToken(position, token));
+}
+
+function locationOf(filePath: string, row: number, col: number, length: number):
+    Location|undefined {
+  // Standard library modules are fetched from GitHub and have relative paths
+  // that can't be opened.
+  if (!filePath.startsWith('/') && !/^[a-zA-Z]:\//.test(filePath)) {
+    return undefined;
+  }
+  return {
+    uri: URI.file(filePath).toString(),
+    range: {
+      start: {line: row, character: col},
+      end: {line: row, character: col + length},
+    },
+  };
+}
+
+function identifierLocations(token: SemanticToken): Location[] {
+  const locations: Location[] = [];
+  for (const ref of token.identifier?.tokens ?? []) {
+    const location = locationOf(
+        ref.filePath, ref.token.pos.rowBegin - 1, ref.token.pos.columnBegin - 1,
+        ref.token.text.length);
+    if (location !== undefined) {
+      locations.push(location);
+    }
+  }
+  return locations;
+}
+
+function hoverText(token: SemanticToken): string {
+  const kind = token.modifiers.includes('defaultLibrary') ? 'module' :
+      token.type === 'property'                         ? 'field' :
+                                                          token.type;
+  const name =
+      token.parentName ? `${token.parentName}.${token.text}` : token.text;
+  return `${kind} \`${name}\``;
+}
+
+function encodeTokens(tokens: SemanticToken[]): SemanticTokens {
+  // Tokens must be sent in document order, once per position.
+  const sorted = tokens.slice().sort((a, b) => a.row - b.row || a.col - b.col);
+  const builder = new SemanticTokensBuilder();
+  let lastRow = -1, lastCol = -1;
+  for (const token of sorted) {
+    if (token.row === lastRow && token.col === lastCol) {
+      continue;
+    }
+    lastRow = token.row;
+    lastCol = token.col;
+    let modifiers = 0;
+    for (const modifier of token.modifiers) {
+      modifiers |= tokenModifierBits.get(modifier) ?? 0;
+    }
+    builder.push(
+        token.row, token.col, token.text.length,
+        tokenTypeIndices.get(token.type) ?? 0, modifiers);
+  }
+  return builder.build();
+}
+
+connection.onInitialize((params: InitializeParams): InitializeResult => {
+  analyzer.init(params.workspaceFolders ?? []);
+  return {
+    capabilities: {
+      textDocumentSync: TextDocumentSyncKind.Incremental,
+      semanticTokensProvider: {
+        legend: {
+          tokenTypes: ZINNIA_TOKEN_TYPES,
+          tokenModifiers: ZINNIA_TOKEN_MODIFIERS,
+        },
+        full: true,
+      },
+      hoverProvider: true,
+      definitionProvider: true,
+      referencesProvider: true,
+      documentSymbolProvider: true,
+      completionProvider: {triggerCharacters: ['.']},
+    },
+  };
+});
+
+documents.onDidChangeContent(async change => {
+  const document = change.document;
+  const info = await analyze(document);
+  // Skip stale results if the document changed while it was analyzed.
+  if (documents.get(document.uri)?.version !== document.version) {
+    return;
+  }
+  const end = document.positionAt(document.getText().length);
+  const diagnostics: Diagnostic[] = info.problems.map(problem => {
+    const start = problem.row === undefined ?
+        end :
+        {line: problem.row, character: problem.col ?? 0};
+    return {
+      severity: DiagnosticSeverity.Error,
+      range: {start: start, end: {...start, character: start.character + 1}},
+      message: problem.message,
+      source: 'zinnia',
+    };
+  });
+  connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});
+});
+
+documents.onDidClose(event => {
+  analyses.delete(event.document.uri);
+  connection.sendDiagnostics({uri: event.document.uri, diagnostics: []});
+});
+
+connection.languages.semanticTokens.on(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return encodeTokens(info?.tokens ?? []);
+});
+
+connection.onHover(async (params): Promise<Hover|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const token = info && tokenAt(info, params.position);
+  if (token === undefined || token.type === 'keyword') {
+    return null;
+  }
+  return {
+    contents: {kind: MarkupKind.Markdown, value: hoverText(token)},
+    range: {
+      start: {line: token.row, character: token.col},
+      end: {line: token.row, character: token.col + token.text.length},
+    },
+  };
+});
+
+connection.onDefinition(async (params): Promise<Definition|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const token = info && tokenAt(info, params.position);
+  // An identifier's first token is its declaration.
+  const declaration = token && identifierLocations(token)[0];
+  return declaration ?? null;
+});
+
+connection.onReferences(async (params): Promise<Location[]> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const token = info && tokenAt(info, params.position);
+  if (token === undefined) {
+    return [];
+  }
+  const locations = identifierLocations(token);
+  return params.context.includeDeclaration ? locations : locations.slice(1);
+});
+
+connection.onDocumentSymbol(async (params): Promise<DocumentSymbol[]> => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info?.module === undefined ? [] : documentSymbols(info.module.ast);
+});
+
+const COMPLETION_KINDS: Record<string, CompletionItemKind> = {
+  class: CompletionItemKind.Class,
+  function: CompletionItemKind.Function,
+  method: CompletionItemKind.Method,
+  property: CompletionItemKind.Field,
+  parameter: CompletionItemKind.Variable,
+  variable: CompletionItemKind.Variable,
 };
-let globalSettings: ExampleSettings = defaultSettings;
 
-// Cache the settings of all open documents
-const documentSettings: Map<string, Thenable<ExampleSettings>> = new Map();
-
-connection.onDidChangeConfiguration(change => {
-  if (hasConfigurationCapability) {
-    // Reset all cached document settings
-    documentSettings.clear();
-  } else {
-    globalSettings = <ExampleSettings>(
-        (change.settings.languageServerExample || defaultSettings));
+connection.onCompletion(async (params): Promise<CompletionItem[]> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const items = new Map<string, CompletionItem>();
+  for (const keyword of KEYWORDS) {
+    items.set(keyword, {label: keyword, kind: CompletionItemKind.Keyword});
   }
-  // Refresh the diagnostics since the `maxNumberOfProblems` could have changed.
-  // We could optimize things here and re-fetch the setting first can compare it
-  // to the existing setting, but this is out of scope for this example.
-  connection.languages.diagnostics.refresh();
-});
-
-// function getDocumentSettings(resource: string): Thenable<ExampleSettings> {
-//   if (!hasConfigurationCapability) {
-//     return Promise.resolve(globalSettings);
-//   }
-//   let result = documentSettings.get(resource);
-//   if (!result) {
-//     result = connection.workspace.getConfiguration(
-//         {scopeUri: resource, section: ZINNIA_LANGUAGE_ID});
-//     documentSettings.set(resource, result);
-//   }
-//   return result;
-// }
-
-function getTokenTypeName_(token: SemanticToken): string {
-  return token.modifiers.includes('defaultLibrary') ?
-      'module' :
-      token.type === 'property' ? 'field' : token.type;
-}
-
-function getTokenName_(token: SemanticToken): string {
-  if (token.parentName) {
-    return `${token.parentName}.**${token.text}**`;
+  for (const token of info?.tokens ?? []) {
+    const kind = token.modifiers.includes('defaultLibrary') ?
+        CompletionItemKind.Module :
+        COMPLETION_KINDS[token.type];
+    if (kind !== undefined && !items.has(token.text)) {
+      items.set(token.text, {label: token.text, kind: kind});
+    }
   }
-  return token.text;
-}
-
-function getTokenHoverInfo_(
-    token: SemanticToken, docInfo: SemanticDocInfo|undefined): any {
-  return [`${getTokenTypeName_(token)} ${getTokenName_(token)}`];
-}
-
-function isOnToken_(position: Position, token: SemanticToken): boolean {
-  return position.line == token.row && position.character >= token.col &&
-      position.character < (token.col + token.text.length);
-}
-
-// Only keep settings for open documents
-documents.onDidClose(e => {
-  documentSettings.delete(e.document.uri);
+  return [...items.values()];
 });
 
-connection.onRequest(
-    'textDocument/semanticTokens/full',
-    async (params: SemanticTokensParams2) => {
-      console.log('textDocument/semanticTokens/full', params.textDocument.uri);
-      return (await analyzer.parseDocument(params)).tokens;
-    });
-
-connection.onRequest(
-    'textDocument/semanticTokens/hover', async (params: HoverParams) => {
-      console.log(
-          'textDocument/semanticTokens/hover', params.uri, params.position);
-      const docInfo = analyzer.lookupDocInfoFromFile(params.uri);
-      const tokens = docInfo?.tokens ?? [];
-      for (const token of tokens) {
-        if (isOnToken_(params.position, token)) {
-          console.log(token);
-          return getTokenHoverInfo_(token, docInfo);
-        }
-      }
-    });
-
-connection.languages.diagnostics.on(async (params) => {
-  const document = documents.get(params.textDocument.uri);
-  if (document !== undefined) {
-    return {
-      kind: DocumentDiagnosticReportKind.Full,
-      items: await validateTextDocument(document)
-    } satisfies DocumentDiagnosticReport;
-  } else {
-    // We don't know the document. We can either try to read it from disk
-    // or we don't report problems for it.
-    return {
-      kind: DocumentDiagnosticReportKind.Full,
-      items: []
-    } satisfies DocumentDiagnosticReport;
-  }
-});
-
-// The content of a text document has changed. This event is emitted
-// when the text document first opened or when its content has changed.
-documents.onDidChangeContent(change => {
-  console.log('onDidChangeContent');
-  validateTextDocument(change.document);
-});
-
-async function validateTextDocument(textDocument: TextDocument):
-    Promise<Diagnostic[]> {
-  // const settings = await getDocumentSettings(textDocument.uri);
-
-  // The validator creates diagnostics for all uppercase words length 2 and more
-  // const text = textDocument.getText();
-  // const pattern = /\b[A-Z]{2,}\b/g;
-  // let m: RegExpExecArray | null;
-
-  // let problems = 0;
-  // const diagnostics: Diagnostic[] = [];
-  // while ((m = pattern.exec(text)) != null && problems <
-  // settings.maxNumberOfProblems) { 	problems++; 	const diagnostic:
-  // Diagnostic = { 		severity: DiagnosticSeverity.Warning,
-  // range: { 			start:
-  // textDocument.positionAt(m.index), 			end:
-  // textDocument.positionAt(m.index + m[0].length)
-  // 		},
-  // 		message: `${m[0]} is all uppercase.`,
-  // 		source: 'ex'
-  // 	};
-  // 	if (hasDiagnosticRelatedInformationCapability) {
-  // 		diagnostic.relatedInformation = [
-  // 			{
-  // 				location: {
-  // 					uri: textDocument.uri,
-  // 					range: Object.assign({},
-  // diagnostic.range)
-  // 				},
-  // 				message: 'Spelling matters'
-  // 			},
-  // 			{
-  // 				location: {
-  // 					uri: textDocument.uri,
-  // 					range: Object.assign({},
-  // diagnostic.range)
-  // 				},
-  // 				message: 'Particularly for names'
-  // 			}
-  // 		];
-  // 	}
-  // 	diagnostics.push(diagnostic);
-  // }
-  // return diagnostics;
-  return [];
-}
-
-connection.onDidChangeWatchedFiles(_change => {
-  // Monitored files have change in VSCode
-  connection.console.log('We received a file change event');
-});
-
-// This handler provides the initial list of the completion items.
-connection.onCompletion(
-    (_textDocumentPosition: TextDocumentPositionParams): CompletionItem[] => {
-      // The pass parameter contains the position of the text document in
-      // which code complete got requested. For the example we ignore this
-      // info and always provide the same completion items.
-      if (_textDocumentPosition.position.character == 0) {
-        return [
-          {label: 'import', kind: CompletionItemKind.Text, data: 1},
-          {label: 'class', kind: CompletionItemKind.Text, data: 2},
-          {label: 'def', kind: CompletionItemKind.Text, data: 3}
-        ];
-      } else {
-        return [];
-      }
-    });
-
-// This handler resolves additional information for the item selected in
-// the completion list.
-connection.onCompletionResolve((item: CompletionItem): CompletionItem => {
-  if (item.data === 1) {
-    item.detail = 'Module import';
-    item.documentation = 'Module import';
-  } else if (item.data === 2) {
-    item.detail = 'Class definition';
-    item.documentation = 'Class definition';
-  } else if (item.data === 3) {
-    item.detail = 'Function definition';
-    item.documentation = 'Function definition';
-  }
-  return item;
-});
-
-// Make the text document manager listen on the connection
-// for open, change and close text document events
 documents.listen(connection);
-
-// Listen on the connection
 connection.listen();

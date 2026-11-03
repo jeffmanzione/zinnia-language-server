@@ -2,7 +2,7 @@ import {DirEntry} from './interfaces';
 
 const ZINNIA_GITHUB_REPO = 'jeffmanzione/zinnia';
 
-interface FileContents {
+export interface FileContents {
   uri: string;
   text: string;
 }

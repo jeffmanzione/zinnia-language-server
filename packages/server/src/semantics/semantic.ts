@@ -1,7 +1,7 @@
 import * as parsec from 'typescript-parsec';
 
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
-import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
+import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
 import {TokenKind} from './tokenizer';
 
@@ -16,6 +16,8 @@ export interface SemanticToken {
   parentName?: string;
   modifiers: string[];
   filePath: string;
+  // The identifier this token refers to, if any.
+  identifier?: SemanticIdentifier;
 }
 
 type IdType =
@@ -88,7 +90,7 @@ interface SemanticMap {
 }
 
 interface SemanticParens {
-  ast: ParensExpr;
+  ast: ParensExpr|LengthExpr;
   expr: SemanticExpression;
 }
 
@@ -379,6 +381,9 @@ export class SemanticContext {
 
 class TokenGenerator {
   private readonly tokens_: SemanticToken[] = [];
+  // Identifiers whose tokens have been generated. An identifier's tokens
+  // include all of its occurrences, so they are generated once.
+  readonly generatedIdentifiers = new Set<SemanticIdentifier>();
 
   constructor(private readonly filePath_: string) {}
 
@@ -388,6 +393,7 @@ class TokenGenerator {
       modifiers: string[] = [],
       filePath = this.filePath_,
       parentName?: string,
+      identifier?: SemanticIdentifier,
       ): SemanticToken {
     const semanticToken = {
       text: token.text,
@@ -397,6 +403,7 @@ class TokenGenerator {
       filePath: filePath,
       modifiers: modifiers,
       parentName: parentName,
+      identifier: identifier,
     } satisfies SemanticToken;
     this.tokens_.push(semanticToken);
     return semanticToken;
@@ -459,29 +466,27 @@ function selectIdType(id: SemanticIdentifier, token: Token): IdType {
 
 function generateTokenForIdentiferToken(
     id: SemanticIdentifier, tok: TokenFile, context: SemanticContext,
-    generator: TokenGenerator, parentName?: string): void {
-  const modifiers = id.modifiers.slice();
+    generator: TokenGenerator, parentName?: string,
+    extraModifiers: string[] = []): void {
+  const modifiers = id.modifiers.concat(extraModifiers);
   generator.createToken(
       tok.token, selectIdType(id, tok.token), modifiers, tok.filePath,
-      parentName);
+      parentName, id);
 }
 
 function generateTokensForIdentifier(
     id: SemanticIdentifier, context: SemanticContext, generator: TokenGenerator,
     parentName?: string): void {
-  if (id == null /* || id.hasGenerated() */) {
+  if (id == null || generator.generatedIdentifiers.has(id)) {
     return;
   }
-  let doneFirst = false;
-  const modifiers = id.modifiers.slice();
-  for (const tok of id.tokens) {
+  generator.generatedIdentifiers.add(id);
+  id.tokens.forEach((tok, i) => {
     // The first token is always the declaration.
-    if (!doneFirst) {
-      modifiers.push('declaration');
-      doneFirst = true;
-    }
-    generateTokenForIdentiferToken(id, tok, context, generator, parentName);
-  }
+    generateTokenForIdentiferToken(
+        id, tok, context, generator, parentName,
+        i === 0 ? ['declaration'] : []);
+  });
   id.markGenerated();
 }
 
@@ -524,7 +529,7 @@ function lookupMemberFromPossibleModule(
   if (possibleModule && possibleModule.type === 'variable' &&
       possibleModule.modifiers.includes('defaultLibrary')) {
     return context.lookupDocInfo(possibleModule.id)
-        ?.context.block.findIdentifier(tok.text);
+        ?.context?.block.findIdentifier(tok.text);
   }
   return null;
 }
@@ -706,7 +711,8 @@ function generateTokensForExpression(
     generateTokensForMap(expr as SemanticMap, context, generator);
   } else if (expr.ast.kind === 'NamedArgExpr') {
     generateTokensForNamedArg(expr as SemanticNamedArg, context, generator);
-  } else if (expr.ast.kind === 'ParensExpr') {
+  } else if (expr.ast.kind === 'ParensExpr' ||
+             expr.ast.kind === 'LengthExpr') {
     if ((expr as SemanticParens).expr != null) {
       generateTokensForExpression(
           (expr as SemanticParens).expr, context, generator);
@@ -731,6 +737,9 @@ function generateTokensForAssignLhs(
     asgn: SemanticAssignLhs, context: SemanticContext,
     generator: TokenGenerator): void {
   if (asgn.ast.kind === 'IdentifierExpr') {
+    if (asgn.ast.constTok) {
+      generator.createToken(asgn.ast.constTok, 'keyword');
+    }
     generateTokensForExpression(
         asgn.expr as SemanticIdentifier, context, generator);
   } else if (isPostfixExpr(asgn.ast)) {
@@ -1101,7 +1110,7 @@ function processExpression(
     return processMap(expr, context);
   } else if (expr.kind === 'NamedArgExpr') {
     return processNamedArg(expr, context);
-  } else if (expr.kind === 'ParensExpr') {
+  } else if (expr.kind === 'ParensExpr' || expr.kind === 'LengthExpr') {
     return {ast: expr, expr: processExpression(expr.expr, context)};
   } else if (expr.kind === 'IsExpr') {
     return processIs(expr, context);
@@ -1148,7 +1157,9 @@ function processAssignLhs(
   if (expr.kind === 'IdentifierExpr') {
     return {
       ast: expr,
-      expr: processIdentifier(expr, context, 'variable', ['local'])
+      expr: processIdentifier(
+          expr, context, 'variable',
+          expr.constTok ? ['local', 'readonly'] : ['local'])
     };
   }
 

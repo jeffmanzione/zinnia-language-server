@@ -5,17 +5,46 @@ import {WorkspaceFolder} from 'vscode-languageserver/node';
 import {URI} from 'vscode-uri';
 
 import {SemanticTokensParams2} from '../interfaces';
-import {fetchZinniaLibs} from '../lib';
+import {fetchZinniaLibs, FileContents} from '../lib';
 
 import {MODULE} from './parser';
 import {generateSemanticTokens, SemanticContext, SemanticIdentifier, SemanticModule, SemanticToken} from './semantic';
 import {zinniaTokenizer} from './tokenizer';
 
+// A problem found while parsing a document. Rows and columns are 0-based. A
+// problem with no position is at the end of the document.
+export interface ParseProblem {
+  message: string;
+  row?: number;
+  col?: number;
+}
+
 export interface SemanticDocInfo {
   path: string;
-  context: SemanticContext;
-  module: SemanticModule;
+  context?: SemanticContext;
+  module?: SemanticModule;
   tokens: SemanticToken[];
+  // Problems found in the latest version of the document. When it fails to
+  // parse, the other fields are from the last version that parsed, if any.
+  problems: ParseProblem[];
+}
+
+function toParseProblem_(e: any): ParseProblem {
+  // typescript-parsec throws TokenErrors, which carry the position separately
+  // from the message.
+  if (e && typeof e.errorMessage === 'string') {
+    const message = e.errorMessage.replace(
+        /<END-OF-FILE>/g, 'the end of the file');
+    if (e.pos === undefined) {
+      return {message: message};
+    }
+    return {
+      message: message,
+      row: e.pos.rowBegin - 1,
+      col: e.pos.columnBegin - 1,
+    };
+  }
+  return {message: String(e)};
 }
 
 function* findLocalZnFiles_(dirs: string[]): Generator<string> {
@@ -47,11 +76,15 @@ export class SemanticAnalyzer {
     this.initReject_ = reject;
   }
 
-  async init(workspaceFolders: WorkspaceFolder[]): Promise<void> {
+  // Loads the standard library with [loadLibs], which fetches it from GitHub
+  // by default.
+  async init(
+      workspaceFolders: WorkspaceFolder[],
+      loadLibs: () => Promise<FileContents[]> = fetchZinniaLibs): Promise<void> {
     try {
       this.workspacePaths_ = workspaceFolders.map(
           wf => URI.parse(wf.uri).fsPath.replace(/\\/g, '/'));
-      const libs = await fetchZinniaLibs();
+      const libs = await loadLibs();
       for (const lib of libs) {
         const info = this.parseDocumentText_(lib.uri, lib.text);
         this.libNamesToFilePaths_.set(
@@ -59,10 +92,12 @@ export class SemanticAnalyzer {
                 'zinnia/lib/'.length, info.path.length - '.zn'.length),
             info.path);
       }
-      this.initResolve_!();
     } catch (e: any) {
-      this.initReject_!(e);
+      // Carry on without the standard library (e.g., when offline) rather than
+      // failing every request.
+      console.error('Could not load the Zinnia standard library:', e);
     }
+    this.initResolve_!();
   }
 
   private async lookupSemanticDocInfo_(moduleName: string):
@@ -92,11 +127,14 @@ export class SemanticAnalyzer {
   }
 
   private parseDocumentText_(path: string, text: string): SemanticDocInfo {
-    console.log(`Processing ${path}`);
     try {
       const token = zinniaTokenizer.parse(text);
       const parserOutput = MODULE.parse(token);
       const output = expectSingleResult(expectEOF(parserOutput));
+      // This document's previous analysis added its occurrences to identifiers
+      // shared with other documents (e.g., builtins); remove them so they
+      // don't accumulate with each reanalysis.
+      this.forgetOccurrencesIn_(path);
       const [context, module, tokens] =
           generateSemanticTokens(path, this, output);
       const info: SemanticDocInfo = {
@@ -104,12 +142,35 @@ export class SemanticAnalyzer {
         context: context,
         module: module,
         tokens: tokens,
+        problems: [],
       };
       this.docs_.set(path, info);
       return info;
     } catch (e) {
-      console.log(e);
-      return {} as SemanticDocInfo;
+      // Keep the last good analysis so highlighting and hovers keep working
+      // while the document is being edited.
+      const previous = this.docs_.get(path);
+      const info: SemanticDocInfo = {
+        path: path,
+        context: previous?.context,
+        module: previous?.module,
+        tokens: previous?.tokens ?? [],
+        problems: [toParseProblem_(e)],
+      };
+      this.docs_.set(path, info);
+      return info;
+    }
+  }
+
+  private forgetOccurrencesIn_(path: string): void {
+    const previous = this.docs_.get(path);
+    if (previous === undefined) {
+      return;
+    }
+    const identifiers = new Set(
+        previous.tokens.map(t => t.identifier).filter(id => id !== undefined));
+    for (const id of identifiers) {
+      id.tokens = id.tokens.filter(t => t.filePath !== path);
     }
   }
 
@@ -148,6 +209,6 @@ export class SemanticAnalyzer {
   }
 
   searchBuiltinForId(id: string): SemanticIdentifier|undefined {
-    return this.builtin?.context.block.findIdentifier(id, false);
+    return this.builtin?.context?.block.findIdentifier(id, false);
   }
 }

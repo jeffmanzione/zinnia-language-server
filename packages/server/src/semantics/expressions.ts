@@ -7,6 +7,8 @@ type Token = parsec.Token<TokenKind>;
 export interface IdentifierExpr {
 	kind: 'IdentifierExpr';
 	token: Token;
+	// Set on the target of `const x = ...`.
+	constTok?: Token;
 }
 
 export interface NoneExpr {
@@ -104,6 +106,14 @@ export interface ParensExpr {
 	rparen: Token;
 }
 
+// |x|, which evaluates to x.len().
+export interface LengthExpr {
+	kind: 'LengthExpr';
+	expr: Expression;
+	lpipe: Token;
+	rpipe: Token;
+}
+
 export interface PostfixChainExpr {
 	kind: 'PostfixChainExpr';
 	lhs: PrimaryExpr;
@@ -151,7 +161,7 @@ export interface InExpr {
 export interface RelationChainExpr {
 	kind: 'RelationChainExpr';
 	tokens: Token[];
-	exprs: (InExpr | AddExpr)[];
+	exprs: (IsExpr | InExpr | AddExpr)[];
 }
 
 export interface EqualChainExpr {
@@ -172,17 +182,19 @@ export interface OrChainExpr {
 	exprs: AndExpr[];
 }
 
+// `is` binds like a comparison operator, more tightly than `==`, `and` and
+// `or`.
 export interface IsExpr {
 	kind: 'IsExpr';
-	lhs: OrExpr;
-	rhs: OrExpr;
+	lhs: InExpr | AddExpr;
+	rhs: InExpr | AddExpr;
 	isTok: Token;
 }
 
 export interface ConditionBaseExpr {
 	kind: 'ConditionBaseExpr';
 	if: Token;
-	condition: IsExpr | OrExpr;
+	condition: OrExpr;
 	then?: Token;
 	ifTrue: ConditionExpr;
 	else?: Token;
@@ -259,6 +271,7 @@ export type PrimaryExpr =
 	| ArrayExpr
 	| MapExpr
 	| ParensExpr
+	| LengthExpr
 	| AnonExpr;
 
 const constantExprs = new Set([
@@ -284,7 +297,8 @@ const primaryExprs = new Set([
 	'StringExpr',
 	'ArrayExpr',
 	'MapExpr',
-	'TupleExpr'
+	'TupleExpr',
+	'LengthExpr'
 ]);
 
 export function isPrimaryExpr(expr: object): boolean {
@@ -338,6 +352,7 @@ export type AddExpr =
 
 export type RelationExpr =
 	| RelationChainExpr
+	| IsExpr
 	| InExpr
 	| AddExpr;
 
@@ -355,7 +370,6 @@ export type OrExpr =
 
 export type ConditionExpr =
 	| ConditionBaseExpr
-	| IsExpr
 	| OrExpr;
 
 export type AssignExpr =

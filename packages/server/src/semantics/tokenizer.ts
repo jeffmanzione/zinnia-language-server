@@ -15,7 +15,6 @@ export enum TokenKind {
   KEYWORD_CLASS,
   KEYWORD_CONST,
   KEYWORD_CONTINUE,
-  KEYWORD_DEF,
   KEYWORD_DEL,
   KEYWORD_DELETE,
   KEYWORD_ELSE,
@@ -95,7 +94,8 @@ export enum TokenKind {
 }
 
 export const zinniaTokenizer = buildLexer([
-  [true, /^i?'(\\'|[^'])*'/g, TokenKind.LITERAL_STRING],
+  // A backslash escapes the next character, including another backslash.
+  [true, /^i?'(\\.|[^'\\])*'/g, TokenKind.LITERAL_STRING],
   [true, /^\d+\.\d+/g, TokenKind.LITEARL_FLOAT],
   [true, /^\d+/g, TokenKind.LITEARL_INTEGER],
 
@@ -111,7 +111,6 @@ export const zinniaTokenizer = buildLexer([
   [true, /^class/g, TokenKind.KEYWORD_CLASS],
   [true, /^const/g, TokenKind.KEYWORD_CONST],
   [true, /^continue/g, TokenKind.KEYWORD_CONTINUE],
-  [true, /^def/g, TokenKind.KEYWORD_DEF],
   [true, /^del/g, TokenKind.KEYWORD_DEL],
   [true, /^delete/g, TokenKind.KEYWORD_DELETE],
   [true, /^else/g, TokenKind.KEYWORD_ELSE],
