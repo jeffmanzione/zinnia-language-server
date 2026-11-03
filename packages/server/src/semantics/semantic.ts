@@ -2,6 +2,7 @@
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
 import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
+import {NATIVE_CLASSES, NATIVE_FUNCTIONS, NATIVE_METHODS} from './natives';
 import {Token, TokenKind} from './tokenizer';
 
 export interface SemanticToken {
@@ -38,6 +39,9 @@ export class SemanticIdentifier {
   isConst = false;
   // The parameters of a function, or of a class's constructor.
   signature?: Signature;
+  // For a module member defined as another name, e.g. `self.sort =
+  // builtin_ext.sort`: that name, and the module it's in if not this one.
+  aliasOf?: {module?: string, name: string};
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -99,18 +103,15 @@ function problemAt(
 // Names that are always defined: module-level globals and names defined
 // natively in builtin rather than in builtin.zn.
 const GLOBAL_NAMES = new Set([
-  'self', 'args', '__main', 'Int', 'Float', 'Bool', 'Char', 'color', 'is_int',
-  'is_float', 'is_bool', '__stringify', '__tuple', '__collect_garbage', 'Range',
-  'Isolate', 'ActorRef', 'Frame', 'Scope', 'Object', 'Class', 'Function',
-  'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple', 'Error',
-  'Future',
+  'self', 'args', '__main', 'Char', 'Frame', 'Scope', 'Object', 'Class',
+  'Function', 'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple',
+  'Error', 'Future', ...Object.keys(NATIVE_FUNCTIONS.builtin),
+  ...NATIVE_CLASSES.builtin,
 ]);
 
-// Native methods every object has, which methods can call without `self.`.
-const OBJECT_MEMBERS = new Set([
-  'class', 'super', 'hash', 'copy', '$get', '$set', '$adr', '$hex_addr',
-  'to_s',
-]);
+// Methods every object has, which methods can call without `self.`.
+const OBJECT_MEMBERS =
+    new Set([...Object.keys(NATIVE_METHODS.Object), 'to_s']);
 
 // Native methods of a module, which its top-level code can call unqualified.
 const MODULE_MEMBERS = new Set(['name', 'functions', 'classes']);
@@ -1414,11 +1415,39 @@ function processAssignLhs(
 
 function processAssign(
     expr: AssignBaseExpr, context: SemanticContext): SemanticAssign {
-  return {
+  const assign = {
     ast: expr,
     lhs: processAssignLhs(expr.lhs, context),
     rhs: processExpression(expr.rhs, context)
   };
+  recordAlias(expr, context);
+  return assign;
+}
+
+// Records that a module member defined as another name, as in `self.sort =
+// builtin_ext.sort` or `self.f = g`, is an alias of it.
+function recordAlias(expr: AssignBaseExpr, context: SemanticContext): void {
+  const lhs = expr.lhs;
+  if (context.block.kind !== 'module' || lhs.kind !== 'PostfixChainExpr' ||
+      lhs.lhs.kind !== 'IdentifierExpr' || lhs.lhs.token.text !== 'self' ||
+      lhs.postfixes.length !== 1 || lhs.postfixes[0].kind !== 'MemberAccessExpr') {
+    return;
+  }
+  const member = context.block.findScoped(lhs.postfixes[0].field.token.text)?.id;
+  const rhs = expr.rhs;
+  if (member === undefined) {
+    return;
+  }
+  if (rhs.kind === 'IdentifierExpr') {
+    member.aliasOf = {name: rhs.token.text};
+  } else if (
+      rhs.kind === 'PostfixChainExpr' && rhs.lhs.kind === 'IdentifierExpr' &&
+      rhs.postfixes.length === 1 && rhs.postfixes[0].kind === 'MemberAccessExpr') {
+    member.aliasOf = {
+      module: rhs.lhs.token.text,
+      name: rhs.postfixes[0].field.token.text,
+    };
+  }
 }
 
 function processFunction(

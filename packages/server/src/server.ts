@@ -3,9 +3,11 @@ import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
-import {callAt, classAt, classMembers, memberAccessAt, moduleMembers, signatureInformation} from './completion';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, signatureInformation} from './completion';
 import {loadZinniaLibs} from './lib';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
+import {ImportStat} from './semantics/statements';
+import {NATIVE_FUNCTIONS, NATIVE_METHODS} from './semantics/natives';
 import {SemanticClass, SemanticToken} from './semantics/semantic';
 import {documentSymbols} from './symbols';
 
@@ -263,7 +265,8 @@ async function memberCompletions(
   const imprt = info.module?.imports.find(i => i.name.id === receiver);
   if (imprt !== undefined) {
     const module = await analyzer.importedModule(info.path, imprt);
-    return module === undefined ? [] : moduleMembers(module);
+    return module === undefined ? [] :
+                                  moduleMembers(module, moduleNameOf(imprt.ast), analyzer);
   }
   // The receiver's class isn't known, so offer the members of all known
   // classes.
@@ -272,6 +275,17 @@ async function memberCompletions(
     for (const item of classMembers(cls, text)) {
       if (!items.has(item.label)) {
         items.set(item.label, item);
+      }
+    }
+  }
+  for (const methods of Object.values(NATIVE_METHODS)) {
+    for (const [name, params] of Object.entries(methods)) {
+      if (!items.has(name)) {
+        items.set(name, {
+          label: name,
+          kind: CompletionItemKind.Method,
+          detail: nativeSignature(name, params).label,
+        });
       }
     }
   }
@@ -308,11 +322,20 @@ async function signatureFor(
     line: number): Promise<SignatureInformation|undefined> {
   const methodOf = (cls: SemanticClass|undefined, text: string) => {
     const method = cls?.methods.get(name);
-    return method && signatureInformation(
-        name, {params: method.ast.params, isNamed: method.ast.isNamed}, text);
+    if (method !== undefined) {
+      return signatureInformation(
+          name, {params: method.ast.params, isNamed: method.ast.isNamed}, text);
+    }
+    const native = cls && nativeMethodsOfClass(cls)[name];
+    return native && nativeSignature(name, native);
   };
   if (receiver === 'self') {
-    return methodOf(classAt(info, line), info.text);
+    const cls = classAt(info, line);
+    if (cls !== undefined) {
+      return methodOf(cls, info.text);
+    }
+    // At the top level, `self` is the module.
+    receiver = undefined;
   }
   if (receiver !== undefined) {
     const imprt = info.module?.imports.find(i => i.name.id === receiver);
@@ -320,31 +343,49 @@ async function signatureFor(
       const module = await analyzer.importedModule(info.path, imprt);
       const id = module &&
           [...module.context?.block.definitions() ?? []].find(d => d.id === name);
-      return id?.signature &&
-          signatureInformation(name, id.signature, module!.text);
+      if (id !== undefined) {
+        return identifierSignature(name, id, module, analyzer);
+      }
+      const native = NATIVE_FUNCTIONS[moduleNameOf(imprt.ast) ?? '']?.[name];
+      return native && nativeSignature(name, native);
     }
     // The receiver's class isn't known: use the first known class with a
-    // method of this name.
+    // method of this name, then the first native one.
     for (const {cls, text} of knownClasses(info)) {
       const signature = methodOf(cls, text);
       if (signature !== undefined) {
         return signature;
       }
     }
+    for (const methods of Object.values(NATIVE_METHODS)) {
+      if (methods[name] !== undefined) {
+        return nativeSignature(name, methods[name]);
+      }
+    }
     return undefined;
   }
   const local =
       [...info.context?.block.definitions() ?? []].find(d => d.id === name);
-  if (local?.signature !== undefined) {
-    return signatureInformation(name, local.signature, info.text);
+  const localSignature =
+      local && identifierSignature(name, local, info, analyzer);
+  if (localSignature !== undefined) {
+    return localSignature;
   }
   const builtin = analyzer.searchBuiltinForId(name);
-  if (builtin?.signature !== undefined) {
-    return signatureInformation(
-        name, builtin.signature,
-        analyzer.lookupDocInfoFromModuleName('builtin')?.text);
+  const builtinSignature = builtin &&
+      identifierSignature(
+          name, builtin, analyzer.lookupDocInfoFromModuleName('builtin'),
+          analyzer);
+  if (builtinSignature !== undefined) {
+    return builtinSignature;
   }
-  return undefined;
+  const native = NATIVE_FUNCTIONS.builtin[name];
+  return native && nativeSignature(name, native);
+}
+
+// The name of the module [imprt] imports, unless it's given as a path.
+function moduleNameOf(imprt: ImportStat): string|undefined {
+  return imprt.source.kind === 'StringExpr' ? undefined : imprt.source.token.text;
 }
 
 connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
