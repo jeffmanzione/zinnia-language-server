@@ -565,9 +565,6 @@ export class SemanticContext {
     this.module = module;
   }
 
-  async lookupModule(name: string): Promise<SemanticModule|null> {
-    return this.analyzer.lookupModule(name);
-  }
 
   lookupDocInfo(moduleName: string): SemanticDocInfo|null {
     return this.analyzer.lookupDocInfoFromModuleName(moduleName) ?? null;

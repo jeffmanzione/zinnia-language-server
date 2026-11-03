@@ -22,21 +22,54 @@ export interface SemanticDocInfo {
   problems: ParseProblem[];
 }
 
-function* findLocalZnFiles_(dirs: string[]): Generator<string> {
-  for (const dir of dirs) {
-    const files = readdirSync(dir, {withFileTypes: true});
-    for (const file of files) {
-      if (file.isDirectory()) {
-        yield* findLocalZnFiles_([path.join(dir, file.name)]);
-      } else if (file.name.endsWith('.zn')) {
-        yield path.join(dir, file.name);
+// Directories that hold no Zinnia sources of the workspace's own.
+function isSkippedDir(name: string): boolean {
+  return name.startsWith('.') || name === 'node_modules' ||
+      name.startsWith('bazel-');
+}
+
+// Yields the paths of the .zn files under [dir], with '/' separators.
+export function* findZnFiles(dir: string): Generator<string> {
+  let entries;
+  try {
+    entries = readdirSync(dir, {withFileTypes: true});
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      if (!isSkippedDir(entry.name)) {
+        yield* findZnFiles(path.join(dir, entry.name));
       }
+    } else if (entry.name.endsWith('.zn')) {
+      yield path.join(dir, entry.name).replace(/\\/g, '/');
     }
   }
 }
 
+// The modules [text] imports, as written: names, or paths for quoted imports.
+function importsIn(text: string): {name: string, isPath: boolean}[] {
+  const imports = [];
+  for (const match of text.matchAll(/^\s*import\s+(i?'[^'\n]*'|[\w$]+)/gm)) {
+    const isPath = match[1].endsWith('\'');
+    imports.push({
+      name: isPath ? match[1].replace(/^i?'|'$/g, '') : match[1],
+      isPath: isPath,
+    });
+  }
+  return imports;
+}
+
+// The path, with '/' separators, of the file at [uri].
+export function filePathOf(uri: string): string {
+  return URI.parse(uri).fsPath.replace(/\\/g, '/');
+}
+
 export class SemanticAnalyzer {
   private readonly docs_: Map<string, SemanticDocInfo> = new Map();
+  // The files the editor has open, whose text comes from the editor rather
+  // than the disk.
+  private readonly openFiles_ = new Set<string>();
   private readonly libNamesToFilePaths_: Map<string, string> = new Map();
   private workspacePaths_: string[] = [];
 
@@ -51,8 +84,6 @@ export class SemanticAnalyzer {
     this.initReject_ = reject;
   }
 
-  // Loads the standard library with [loadLibs], which fetches it from GitHub
-  // by default.
   // Loads the standard library with [loadLibs], which reads the bundled copy by
   // default.
   async init(
@@ -77,28 +108,6 @@ export class SemanticAnalyzer {
       console.error('Could not load the Zinnia standard library:', e);
     }
     this.initResolve_!();
-  }
-
-  private async lookupSemanticDocInfo_(moduleName: string):
-      Promise<SemanticDocInfo|null> {
-    if (this.libNamesToFilePaths_.has(moduleName)) {
-      return this.docs_.get(this.libNamesToFilePaths_.get(moduleName)!)!;
-    }
-    for (const fileName of findLocalZnFiles_(this.workspacePaths_)) {
-      if (moduleName == this.convertFileNameToModuleFormat_(fileName)) {
-        return this.parseDocument({textDocument: {uri: fileName}});
-      }
-    }
-    return null;
-  }
-
-  private convertFileNameToModuleFormat_(fileName: string): string {
-    for (const wsPath of this.workspacePaths_) {
-      if (fileName.startsWith(wsPath)) {
-        return fileName.slice(wsPath.length, fileName.length - '.zn'.length);
-      }
-    }
-    return fileName.slice(0, fileName.length - '.zn'.length);
   }
 
   // Returns the analysis of the module that [imprt], in the file at
@@ -126,6 +135,132 @@ export class SemanticAnalyzer {
     return undefined;
   }
 
+  // The paths of the workspace files that an import of [name] in the file at
+  // [fromPath] may name, in the order they're tried. [isPath] is whether the
+  // import names it with a path.
+  private importCandidates_(fromPath: string, name: string, isPath: boolean):
+      string[] {
+    if (!isPath && this.libNamesToFilePaths_.has(name)) {
+      return [];
+    }
+    return [...this.workspacePaths_, path.dirname(fromPath)].map(
+        dir => path.join(dir, name + '.zn').replace(/\\/g, '/'));
+  }
+
+  // The workspace file that an import of [name] in the file at [fromPath]
+  // names, if it exists.
+  private workspaceImportPath_(fromPath: string, name: string, isPath: boolean):
+      string|undefined {
+    return this.importCandidates_(fromPath, name, isPath)
+        .find(filePath => this.docs_.has(filePath) || existsSync(filePath));
+  }
+
+  // Analyzes every Zinnia file in the workspace that isn't open or part of the
+  // standard library, each after the workspace modules it imports, so that
+  // references, rename and workspace symbols cover the whole workspace.
+  // Returns the number of files analyzed.
+  async indexWorkspace(): Promise<number> {
+    await this.initPromise_;
+    const done = new Set<string>();
+    let count = 0;
+    for (const dir of this.workspacePaths_) {
+      for (const filePath of findZnFiles(dir)) {
+        if (!done.has(filePath)) {
+          count += this.indexFile_(filePath, new Set(), done);
+          // Let requests in between files.
+          await new Promise(resolve => setImmediate(resolve));
+        }
+      }
+    }
+    return count;
+  }
+
+  // Analyzes [filePath] after the workspace modules it imports. Returns the
+  // number of files analyzed.
+  private indexFile_(filePath: string, visiting: Set<string>, done: Set<string>):
+      number {
+    if (done.has(filePath) || visiting.has(filePath) ||
+        this.isStandardLibraryFile(filePath)) {
+      return 0;
+    }
+    visiting.add(filePath);
+    let text: string;
+    const isOpen = this.openFiles_.has(filePath);
+    try {
+      text = isOpen ? this.docs_.get(filePath)?.text ?? '' :
+                      readFileSync(filePath, 'utf8');
+    } catch {
+      done.add(filePath);
+      return 0;
+    }
+    let count = 0;
+    for (const imprt of importsIn(text)) {
+      const imported =
+          this.workspaceImportPath_(filePath, imprt.name, imprt.isPath);
+      if (imported !== undefined) {
+        count += this.indexFile_(imported, visiting, done);
+      }
+    }
+    if (!isOpen) {
+      this.parseDocumentText_(filePath, text);
+      count++;
+    }
+    done.add(filePath);
+    return count;
+  }
+
+  // Records whether the editor has [filePath] open. Once it's closed, its
+  // analysis is of its text on disk again.
+  setOpen(filePath: string, open: boolean): void {
+    if (open) {
+      this.openFiles_.add(filePath);
+    } else if (this.openFiles_.delete(filePath)) {
+      this.refreshFile(filePath);
+    }
+  }
+
+  // Reanalyzes [filePath], unless it's open, after it changed on disk, and the
+  // workspace files that import it.
+  refreshFile(filePath: string): void {
+    if (this.isStandardLibraryFile(filePath)) {
+      return;
+    }
+    if (!this.openFiles_.has(filePath)) {
+      let text: string;
+      try {
+        text = readFileSync(filePath, 'utf8');
+      } catch {
+        this.forgetFile(filePath);
+        return;
+      }
+      this.parseDocumentText_(filePath, text);
+    }
+    this.reanalyzeImportersOf_(filePath);
+  }
+
+  // Forgets [filePath], which was deleted, and reanalyzes the workspace files
+  // that import it.
+  forgetFile(filePath: string): void {
+    if (this.openFiles_.has(filePath)) {
+      return;
+    }
+    this.forgetOccurrencesIn_(filePath);
+    if (this.docs_.delete(filePath)) {
+      this.reanalyzeImportersOf_(filePath);
+    }
+  }
+
+  private reanalyzeImportersOf_(filePath: string): void {
+    for (const doc of [...this.docs_.values()]) {
+      if (doc.path !== filePath && !this.isStandardLibraryFile(doc.path) &&
+          importsIn(doc.text).some(
+              i => this.importCandidates_(doc.path, i.name, i.isPath)
+                       .includes(filePath))) {
+        this.parseDocumentText_(doc.path, doc.text);
+      }
+    }
+  }
+
   // Returns the analysis of the module [name] that the file at [fromPath]
   // imports, if that module has already been analyzed. [isPath] is whether
   // the import names it with a path.
@@ -143,10 +278,6 @@ export class SemanticAnalyzer {
       }
     }
     return undefined;
-  }
-
-  async lookupModule(moduleName: string): Promise<SemanticModule|null> {
-    return (await this.lookupSemanticDocInfo_(moduleName))?.module ?? null;
   }
 
   private parseDocumentText_(path: string, text: string): SemanticDocInfo {
@@ -237,7 +368,7 @@ export class SemanticAnalyzer {
 
   private async parseDocumentWithoutWaitingForLibs_(
       params: SemanticTokensParams2): Promise<SemanticDocInfo> {
-    const path = URI.parse(params.textDocument.uri).fsPath.replace(/\\/g, '/');
+    const path = filePathOf(params.textDocument.uri);
 
     let text: string;
     if ('text' in params) {

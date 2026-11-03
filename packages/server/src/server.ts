@@ -1,11 +1,11 @@
-import {CompletionItem, CompletionItemKind, createConnection, Definition, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, signatureInformation} from './completion';
 import {loadZinniaLibs} from './lib';
-import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
+import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
 import {NATIVE_FUNCTIONS, NATIVE_METHODS} from './semantics/natives';
 import {SemanticClass, SemanticToken} from './semantics/semantic';
@@ -141,10 +141,15 @@ function loadLibs(libraryPath: string|undefined) {
   return loadZinniaLibs();
 }
 
+// Whether the client can be asked to watch files for the server.
+let canWatchFiles = false;
+
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   const libraryPath = params.initializationOptions?.libraryPath as string |
       undefined;
   analyzer.init(params.workspaceFolders ?? [], () => loadLibs(libraryPath));
+  canWatchFiles = params.capabilities.workspace?.didChangeWatchedFiles
+                      ?.dynamicRegistration === true;
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -165,6 +170,38 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
     },
   };
+});
+
+connection.onInitialized(async () => {
+  if (canWatchFiles) {
+    // Hear about Zinnia files that change outside the editor, e.g. on a
+    // checkout.
+    connection.client.register(
+        DidChangeWatchedFilesNotification.type,
+        {watchers: [{globPattern: '**/*.zn'}]});
+  }
+  const start = Date.now();
+  const count = await analyzer.indexWorkspace();
+  connection.console.log(
+      `Indexed ${count} Zinnia files in ${Date.now() - start} ms.`);
+});
+
+connection.onDidChangeWatchedFiles(params => {
+  for (const change of params.changes) {
+    const filePath = filePathOf(change.uri);
+    if (!filePath.endsWith('.zn')) {
+      continue;
+    }
+    if (change.type === FileChangeType.Deleted) {
+      analyzer.forgetFile(filePath);
+    } else {
+      analyzer.refreshFile(filePath);
+    }
+  }
+});
+
+documents.onDidOpen(event => {
+  analyzer.setOpen(filePathOf(event.document.uri), true);
 });
 
 documents.onDidChangeContent(async change => {
@@ -195,6 +232,7 @@ documents.onDidChangeContent(async change => {
 
 documents.onDidClose(event => {
   analyses.delete(event.document.uri);
+  analyzer.setOpen(filePathOf(event.document.uri), false);
   connection.sendDiagnostics({uri: event.document.uri, diagnostics: []});
 });
 
