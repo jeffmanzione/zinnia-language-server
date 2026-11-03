@@ -1,18 +1,13 @@
-import {ExtensionContext, workspace} from 'vscode';
+import {ExtensionContext} from 'vscode';
 import {LanguageClient, LanguageClientOptions, ServerOptions, TransportKind} from 'vscode-languageclient/node';
 import {SERVER_ENTRY_POINT_PATH, ZINNIA_DOCUMENT_SELECTOR, ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME} from 'zinnia-language-shared/constants';
 
-import {createDocumentTokensProvider as createDocumentTokensSubscription, createHoverSubscription} from './providers';
-
 let client: LanguageClient;
-const clientProvider = () => client;
 
+// The server provides semantic tokens, hovers, definitions, references,
+// document symbols, completion and diagnostics through the standard Language
+// Server Protocol, so the client needs no providers of its own.
 export function activate(context: ExtensionContext) {
-  context.subscriptions.push(
-      createDocumentTokensSubscription(clientProvider),
-      createHoverSubscription(clientProvider),
-  );
-
   const serverEntryPoint = context.asAbsolutePath(SERVER_ENTRY_POINT_PATH);
   // If the extension is launched in debug mode then the debug server options
   // are used Otherwise the run options are used
@@ -29,11 +24,6 @@ export function activate(context: ExtensionContext) {
 
   const clientOptions: LanguageClientOptions = {
     documentSelector: [ZINNIA_DOCUMENT_SELECTOR as any],
-    synchronize: {
-      // Notify the server about file changes to '.clientrc files contained in
-      // the workspace
-      fileEvents: workspace.createFileSystemWatcher('**/.clientrc')
-    }
   };
 
   // Create the language client and start the client.

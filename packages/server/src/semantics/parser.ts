@@ -1,11 +1,35 @@
 import * as parsec from 'typescript-parsec';
 import {alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, rep_sc, rule, seq, tok} from 'typescript-parsec';
 
-import {AddExpr, AndExpr, AnnotationExpr, AnonExpr, ArrayExpr, ArrayIndexExpr, AssignArrayExpr, AssignExpr, AssignLhsExpr, AssignTupleExpr, BinaryExpr, BoolExpr, ConditionExpr, ConstantExpr, EmptyParensExpr, EqualExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, InExpr, IntExpr, IsExpr, isPrimaryExpr, MapEntryExpr, MapExpr, MemberAccessExpr, MultExpr, NamedArgExpr, NewExpr, NoneExpr, OrExpr, ParamExpr, ParensExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, RelationExpr, StringExpr, TupleChainExpr, TupleExpr, UnaryExpr} from './expressions';
+import {AddExpr, AndExpr, AnnotationExpr, AnonExpr, ArrayExpr, ArrayIndexExpr, AssignArrayExpr, AssignExpr, AssignLhsExpr, AssignTupleExpr, BinaryExpr, BoolExpr, ConditionExpr, ConstantExpr, EmptyParensExpr, EqualExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, InExpr, IntExpr, IsExpr, isPrimaryExpr, LengthExpr, MapEntryExpr, MapExpr, MemberAccessExpr, MultExpr, NamedArgExpr, NewExpr, NoneExpr, OrExpr, ParamExpr, ParensExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, RelationExpr, StringExpr, TupleChainExpr, TupleExpr, UnaryExpr} from './expressions';
 import {ClassMemberStat, ClassStat, CompoundStat, ExitStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, IterStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
 import {TokenKind} from './tokenizer';
 
 type Token = parsec.Token<TokenKind>;
+
+// Returns a rule that caches its result for each input token (packrat
+// parsing). Many rules parse a prefix, fail on the next token and then fall
+// back to an alternative that parses the same prefix again. Without caching,
+// that repeated work multiplies with each level of nesting, so parse time
+// grows exponentially with the depth of an expression.
+function memoRule<TKind, TResult>(): parsec.Rule<TKind, TResult> {
+  const r = rule<TKind, TResult>();
+  const parse = r.parse.bind(r);
+  const cache =
+      new WeakMap<parsec.Token<TKind>, parsec.ParserOutput<TKind, TResult>>();
+  r.parse = (token: parsec.Token<TKind>|undefined) => {
+    if (token === undefined) {
+      return parse(token);
+    }
+    let output = cache.get(token);
+    if (output === undefined) {
+      output = parse(token);
+      cache.set(token, output);
+    }
+    return output;
+  };
+  return r;
+}
 
 function applyIdentifier(value: Token): IdentifierExpr {
   return {kind: 'IdentifierExpr', token: value};
@@ -110,6 +134,16 @@ function applyEmptyParens(parens: [Token, Token]): EmptyParensExpr {
   return {kind: 'EmptyParensExpr', lparen: lparen, rparen: rparen};
 }
 
+function applyLength(expr: [Token, TupleExpr, Token]): LengthExpr {
+  const [lpipe, tupExpr, rpipe] = expr;
+  return {kind: 'LengthExpr', expr: tupExpr, lpipe: lpipe, rpipe: rpipe};
+}
+
+function applyConstIdentifier(expr: [Token, IdentifierExpr]): IdentifierExpr {
+  const [constTok, id] = expr;
+  return {...id, constTok: constTok};
+}
+
 function applyParens(expr: [Token, TupleExpr, Token]): ParensExpr {
   const [lparen, tupExpr, rparen] = expr;
   return {kind: 'ParensExpr', expr: tupExpr, lparen: lparen, rparen: rparen};
@@ -200,15 +234,17 @@ function applyAdd(value: [MultExpr, [Token, MultExpr][]]): AddExpr {
   return {kind: 'AddChainExpr', exprs: exprs, tokens: tokens};
 }
 
-function applyIn(expr: [AddExpr, Token, AddExpr]|AddExpr): InExpr|AddExpr {
-  if ('kind' in expr) {
-    return expr;
+function applyIn(expr: [AddExpr, [Token, AddExpr]|undefined]): InExpr|AddExpr {
+  const [lhs, suffix] = expr;
+  if (suffix === undefined) {
+    return lhs;
   }
-  const [lhs, is, rhs] = expr;
-  return {kind: 'InExpr', lhs: lhs, rhs: rhs, inTok: is};
+  const [inTok, rhs] = suffix;
+  return {kind: 'InExpr', lhs: lhs, rhs: rhs, inTok: inTok};
 }
 
-function applyRelation(value: [InExpr|AddExpr, [Token, InExpr | AddExpr][]]):
+function applyRelation(
+    value: [IsExpr|InExpr|AddExpr, [Token, IsExpr | InExpr | AddExpr][]]):
     RelationExpr {
   const [lhs, rhs] = value;
 
@@ -273,21 +309,23 @@ function applyOr(value: [AndExpr, [Token, AndExpr][]]): OrExpr {
   return {kind: 'OrChainExpr', exprs: exprs, tokens: tokens};
 }
 
-function applyIs(expr: [OrExpr, Token, OrExpr]|OrExpr): IsExpr|OrExpr {
-  if ('kind' in expr) {
-    return expr;
+function applyIs(expr: [InExpr|AddExpr, [Token, InExpr | AddExpr]|undefined]):
+    IsExpr|InExpr|AddExpr {
+  const [lhs, suffix] = expr;
+  if (suffix === undefined) {
+    return lhs;
   }
-  const [lhs, is, rhs] = expr;
-  return {kind: 'IsExpr', lhs: lhs, rhs: rhs, isTok: is};
+  const [isTok, rhs] = suffix;
+  return {kind: 'IsExpr', lhs: lhs, rhs: rhs, isTok: isTok};
 }
 
 function applyCondition(
     expr:
         [
-          Token, IsExpr|OrExpr, Token|undefined, ConditionExpr, Token|undefined,
+          Token, OrExpr, Token|undefined, ConditionExpr, Token|undefined,
           ConditionExpr
-        ]|[Token, IsExpr | OrExpr, Token | undefined, ConditionExpr]|IsExpr|
-    OrExpr): ConditionExpr {
+        ]|[Token, OrExpr, Token | undefined, ConditionExpr]|OrExpr):
+    ConditionExpr {
   if ('kind' in expr) {
     return expr;
   }
@@ -774,87 +812,88 @@ function applyModule(value: Statement[]): Module {
 
 // Expressions
 
-export const EXPRESSION = rule<TokenKind, Expression>();
-export const LINES = rule<TokenKind, Token[]|undefined>();
+export const EXPRESSION = memoRule<TokenKind, Expression>();
+export const LINES = memoRule<TokenKind, Token[]|undefined>();
 
 // Literals and identifiers
-export const IDENTIFIER = rule<TokenKind, IdentifierExpr>();
-export const NEW = rule<TokenKind, NewExpr>();
-export const CONSTANT = rule<TokenKind, ConstantExpr>();
-export const STRING = rule<TokenKind, StringExpr>();
+export const IDENTIFIER = memoRule<TokenKind, IdentifierExpr>();
+export const NEW = memoRule<TokenKind, NewExpr>();
+export const CONSTANT = memoRule<TokenKind, ConstantExpr>();
+export const STRING = memoRule<TokenKind, StringExpr>();
 
 // Structures
-export const ARRAY = rule<TokenKind, ArrayExpr>();
-export const MAP_ENTRY = rule<TokenKind, MapEntryExpr>();
-export const MAP = rule<TokenKind, MapExpr>();
-export const TUPLE = rule<TokenKind, TupleExpr>();
+export const ARRAY = memoRule<TokenKind, ArrayExpr>();
+export const MAP_ENTRY = memoRule<TokenKind, MapEntryExpr>();
+export const MAP = memoRule<TokenKind, MapExpr>();
+export const TUPLE = memoRule<TokenKind, TupleExpr>();
 
 // Primary
-export const PRIMARY = rule<TokenKind, PrimaryExpr>();
-export const PRIMARY_NO_CONSTANTS = rule<TokenKind, PrimaryExpr>();
-export const PARENS = rule<TokenKind, ParensExpr>();
-export const EMPTY_PARENS = rule<TokenKind, EmptyParensExpr>();
+export const PRIMARY = memoRule<TokenKind, PrimaryExpr>();
+export const PRIMARY_NO_CONSTANTS = memoRule<TokenKind, PrimaryExpr>();
+export const PARENS = memoRule<TokenKind, ParensExpr>();
+export const LENGTH = memoRule<TokenKind, LengthExpr>();
+export const EMPTY_PARENS = memoRule<TokenKind, EmptyParensExpr>();
 
 // Postfix
-export const POSTFIX = rule<TokenKind, PostfixExpr>();
-export const NAMED_ARG = rule<TokenKind, NamedArgExpr>();
-export const FUNCTION_CALL = rule<TokenKind, FunctionCallExpr>();
-export const ARRAY_INDEX = rule<TokenKind, ArrayIndexExpr>();
-export const MEMBER_ACCESS = rule<TokenKind, MemberAccessExpr>();
+export const POSTFIX = memoRule<TokenKind, PostfixExpr>();
+export const NAMED_ARG = memoRule<TokenKind, NamedArgExpr>();
+export const FUNCTION_CALL = memoRule<TokenKind, FunctionCallExpr>();
+export const ARRAY_INDEX = memoRule<TokenKind, ArrayIndexExpr>();
+export const MEMBER_ACCESS = memoRule<TokenKind, MemberAccessExpr>();
 
-export const RANGE = rule<TokenKind, RangeExpr|PostfixExpr>();
-export const UNARY = rule<TokenKind, UnaryExpr>();
-export const BINARY_AND = rule<TokenKind, BinaryExpr>();
-export const BINARY_XOR = rule<TokenKind, BinaryExpr>();
-export const BINARY_OR = rule<TokenKind, BinaryExpr>();
-export const MULT = rule<TokenKind, MultExpr>();
-export const ADD = rule<TokenKind, AddExpr>();
-export const IN = rule<TokenKind, InExpr|AddExpr>();
-export const RELATION = rule<TokenKind, RelationExpr>();
-export const EQUAL = rule<TokenKind, EqualExpr>();
-export const AND = rule<TokenKind, AndExpr>();
-export const OR = rule<TokenKind, OrExpr>();
-export const IS = rule<TokenKind, IsExpr|OrExpr>();
-export const CONDITION = rule<TokenKind, ConditionExpr>();
+export const RANGE = memoRule<TokenKind, RangeExpr|PostfixExpr>();
+export const UNARY = memoRule<TokenKind, UnaryExpr>();
+export const BINARY_AND = memoRule<TokenKind, BinaryExpr>();
+export const BINARY_XOR = memoRule<TokenKind, BinaryExpr>();
+export const BINARY_OR = memoRule<TokenKind, BinaryExpr>();
+export const MULT = memoRule<TokenKind, MultExpr>();
+export const ADD = memoRule<TokenKind, AddExpr>();
+export const IN = memoRule<TokenKind, InExpr|AddExpr>();
+export const IS = memoRule<TokenKind, IsExpr|InExpr|AddExpr>();
+export const RELATION = memoRule<TokenKind, RelationExpr>();
+export const EQUAL = memoRule<TokenKind, EqualExpr>();
+export const AND = memoRule<TokenKind, AndExpr>();
+export const OR = memoRule<TokenKind, OrExpr>();
+export const CONDITION = memoRule<TokenKind, ConditionExpr>();
 
 // Assignment
-export const ASSIGN = rule<TokenKind, AssignExpr>();
-export const ASSIGN_TUPLE = rule<TokenKind, AssignTupleExpr>();
-export const ASSIGN_ARRAY = rule<TokenKind, AssignArrayExpr>();
-export const ASSIGN_LHS = rule<TokenKind, AssignLhsExpr>();
+export const ASSIGN = memoRule<TokenKind, AssignExpr>();
+export const ASSIGN_TUPLE = memoRule<TokenKind, AssignTupleExpr>();
+export const ASSIGN_ARRAY = memoRule<TokenKind, AssignArrayExpr>();
+export const ASSIGN_LHS = memoRule<TokenKind, AssignLhsExpr>();
 
 // Statements
 
-export const STATEMENT = rule<TokenKind, Statement>();
+export const STATEMENT = memoRule<TokenKind, Statement>();
 
 // Iterative
-export const FOREACH = rule<TokenKind, ForeachStat>();
-export const FOR = rule<TokenKind, ForStat>();
-export const WHILE = rule<TokenKind, WhileStat>();
-export const ITER = rule<TokenKind, IterStat>();
+export const FOREACH = memoRule<TokenKind, ForeachStat>();
+export const FOR = memoRule<TokenKind, ForStat>();
+export const WHILE = memoRule<TokenKind, WhileStat>();
+export const ITER = memoRule<TokenKind, IterStat>();
 
-export const COMPOUND = rule<TokenKind, CompoundStat>();
-export const SELECT = rule<TokenKind, SelectStat>();
-export const EXIT = rule<TokenKind, ExitStat>();
-export const RAISE = rule<TokenKind, RaiseStat>();
-export const TRY = rule<TokenKind, TryStat>();
-export const JUMP = rule<TokenKind, JumpStat>();
+export const COMPOUND = memoRule<TokenKind, CompoundStat>();
+export const SELECT = memoRule<TokenKind, SelectStat>();
+export const EXIT = memoRule<TokenKind, ExitStat>();
+export const RAISE = memoRule<TokenKind, RaiseStat>();
+export const TRY = memoRule<TokenKind, TryStat>();
+export const JUMP = memoRule<TokenKind, JumpStat>();
 
 export const SPECIAL_METHOD_IDENTIFIER =
-    rule<TokenKind, SpecialMethodIdentifierExpr>();
-export const FUNCTION = rule<TokenKind, FunctionStat>();
-export const PARAM = rule<TokenKind, ParamExpr>();
-export const ANON = rule<TokenKind, AnonExpr>();
-export const ANNOTATION = rule<TokenKind, AnnotationExpr>();
+    memoRule<TokenKind, SpecialMethodIdentifierExpr>();
+export const FUNCTION = memoRule<TokenKind, FunctionStat>();
+export const PARAM = memoRule<TokenKind, ParamExpr>();
+export const ANON = memoRule<TokenKind, AnonExpr>();
+export const ANNOTATION = memoRule<TokenKind, AnnotationExpr>();
 
-export const CLASS = rule<TokenKind, ClassStat>();
-export const METHOD = rule<TokenKind, MethodStat>();
-export const FIELD = rule<TokenKind, FieldStat>();
-export const STATIC = rule<TokenKind, StaticStat>();
+export const CLASS = memoRule<TokenKind, ClassStat>();
+export const METHOD = memoRule<TokenKind, MethodStat>();
+export const FIELD = memoRule<TokenKind, FieldStat>();
+export const STATIC = memoRule<TokenKind, StaticStat>();
 
-export const IMPORT = rule<TokenKind, ImportStat>();
+export const IMPORT = memoRule<TokenKind, ImportStat>();
 
-export const MODULE = rule<TokenKind, Module>();
+export const MODULE = memoRule<TokenKind, Module>();
 
 LINES.setPattern(rep_sc(tok(TokenKind.NEWLINE)));
 
@@ -911,11 +950,15 @@ PARENS.setPattern(apply(
     seq(tok(TokenKind.SYMBOL_LPAREN), TUPLE, tok(TokenKind.SYMBOL_RPAREN)),
     applyParens));
 
-PRIMARY.setPattern(
-    alt_sc(ANON, IDENTIFIER, NEW, CONSTANT, STRING, ARRAY, MAP, PARENS));
+LENGTH.setPattern(apply(
+    seq(tok(TokenKind.SYMBOL_PIPE), TUPLE, tok(TokenKind.SYMBOL_PIPE)),
+    applyLength));
+
+PRIMARY.setPattern(alt_sc(
+    ANON, IDENTIFIER, NEW, CONSTANT, STRING, ARRAY, MAP, PARENS, LENGTH));
 
 PRIMARY_NO_CONSTANTS.setPattern(
-    alt_sc(ANON, IDENTIFIER, STRING, ARRAY, MAP, PARENS));
+    alt_sc(ANON, IDENTIFIER, STRING, ARRAY, MAP, PARENS, LENGTH));
 
 EMPTY_PARENS.setPattern(apply(
     seq(tok(TokenKind.SYMBOL_LPAREN), tok(TokenKind.SYMBOL_RPAREN)),
@@ -1001,20 +1044,22 @@ ADD.setPattern(apply(
     applyAdd));
 
 IN.setPattern(apply(
-    alt_sc(
-        seq(ADD,
+    seq(ADD,
+        opt_sc(seq(
             alt_sc(tok(TokenKind.KEYWORD_IN), tok(TokenKind.KEYWORD_NOTIN)),
-            ADD),
-        ADD),
+            ADD))),
     applyIn));
 
+IS.setPattern(apply(
+    seq(IN, opt_sc(seq(tok(TokenKind.KEYWORD_IS), IN))), applyIs));
+
 RELATION.setPattern(apply(
-    seq(IN,
+    seq(IS,
         rep_sc(seq(
             alt_sc(
                 tok(TokenKind.SYMBOL_LTHAN), tok(TokenKind.SYMBOL_GTHAN),
                 tok(TokenKind.SYMBOL_LTHANEQ), tok(TokenKind.SYMBOL_GTHANEQ)),
-            IN))),
+            IS))),
     applyRelation));
 
 EQUAL.setPattern(apply(
@@ -1033,20 +1078,17 @@ AND.setPattern(apply(
 OR.setPattern(
     apply(seq(AND, rep_sc(seq(tok(TokenKind.KEYWORD_OR), AND))), applyOr));
 
-IS.setPattern(
-    apply(alt_sc(seq(OR, tok(TokenKind.KEYWORD_IS), OR), OR), applyIs));
-
 CONDITION.setPattern(apply(
     alt_sc(
-        seq(tok(TokenKind.KEYWORD_IF), IS, opt_sc(tok(TokenKind.KEYWORD_THEN)),
+        seq(tok(TokenKind.KEYWORD_IF), OR, opt_sc(tok(TokenKind.KEYWORD_THEN)),
             CONDITION, tok(TokenKind.KEYWORD_ELSE), CONDITION),
         seq(
             tok(TokenKind.KEYWORD_IF),
-            IS,
+            OR,
             opt_sc(tok(TokenKind.KEYWORD_THEN)),
             CONDITION,
             ),
-        IS),
+        OR),
     applyCondition));
 
 ASSIGN_TUPLE.setPattern(apply(
@@ -1062,7 +1104,11 @@ ASSIGN_ARRAY.setPattern(apply(
     applyAssignArray));
 
 ASSIGN_LHS.setPattern(apply(
-    alt_sc(ASSIGN_TUPLE, ASSIGN_ARRAY, POSTFIX, IDENTIFIER), applyAssignLhs));
+    alt_sc(
+        apply(seq(tok(TokenKind.KEYWORD_CONST), IDENTIFIER),
+              applyConstIdentifier),
+        ASSIGN_TUPLE, ASSIGN_ARRAY, POSTFIX, IDENTIFIER),
+    applyAssignLhs));
 
 ASSIGN.setPattern(apply(
     alt_sc(seq(ASSIGN_LHS, tok(TokenKind.SYMBOL_EQUALS), CONDITION), CONDITION),
@@ -1133,12 +1179,7 @@ JUMP.setPattern(apply(
     kmid(
         LINES,
         alt_sc(
-            seq(tok(TokenKind.KEYWORD_RETURN),
-                alt_sc(
-                    kmid(
-                        tok(TokenKind.SYMBOL_LPAREN), TUPLE,
-                        tok(TokenKind.SYMBOL_RPAREN)),
-                    TUPLE)),
+            seq(tok(TokenKind.KEYWORD_RETURN), TUPLE),
             tok(TokenKind.KEYWORD_RETURN), tok(TokenKind.KEYWORD_BREAK),
             tok(TokenKind.KEYWORD_CONTINUE)),
         LINES),
@@ -1166,7 +1207,7 @@ ANNOTATION.setPattern(apply(
 
 FUNCTION.setPattern(apply(
     seq(opt_sc(rep_sc(ANNOTATION)),
-        alt_sc(tok(TokenKind.KEYWORD_DEF), tok(TokenKind.KEYWORD_FUNCTION)),
+        tok(TokenKind.KEYWORD_FUNCTION),
         IDENTIFIER, tok(TokenKind.SYMBOL_LPAREN),
         alt_sc(
             seq(tok(TokenKind.SYMBOL_LBRACE),
@@ -1241,8 +1282,8 @@ CLASS.setPattern(apply(
 
 IMPORT.setPattern(alt_sc(
     apply(
-        seq(tok(TokenKind.KEYWORD_IMPORT), STRING, tok(TokenKind.KEYWORD_AS),
-            IDENTIFIER),
+        seq(tok(TokenKind.KEYWORD_IMPORT), alt_sc(IDENTIFIER, STRING),
+            tok(TokenKind.KEYWORD_AS), IDENTIFIER),
         applyImportAsStat),
     apply(
         seq(tok(TokenKind.KEYWORD_IMPORT), alt_sc(IDENTIFIER, STRING)),

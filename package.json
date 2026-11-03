@@ -18,7 +18,9 @@
 	},
 	"activationEvents": [],
 	"main": "./packages/client/out/extension",
-	"workspaces": ["packages/*"],
+	"workspaces": [
+		"packages/*"
+	],
 	"contributes": {
 		"languages": [
 			{
@@ -68,7 +70,8 @@
 		"vscode:prepublish": "npm run compile",
 		"compile": "npx tsc -b",
 		"build": "npx vsce package --follow-symlinks",
-		"watch": "npx tsc -b -w"
+		"watch": "npx tsc -b -w",
+		"test": "npm run compile && node --test \"packages/server/out/test/**/*.test.js\""
 	},
 	"vsce": {},
 	"dependencies": {

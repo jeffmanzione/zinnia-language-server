@@ -14,17 +14,9 @@ export const ZINNIA_DOCUMENT_SELECTOR: VsCodeDocumentFilter = {
   pattern: '**/*.zn'
 };
 
-export const ZINNIA_TOKEN_TYPES = [
-  'comment',       'string',   'keyword', 'number',    'regexp',    'operator',
-  'namespace',     'type',     'struct',  'class',     'interface', 'enum',
-  'typeParameter', 'function', 'method',  'decorator', 'macro',     'variable',
-  'parameter',     'property', 'label'
-];
+import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from './legend';
 
-export const ZINNIA_TOKEN_MODIFIERS = [
-  'declaration', 'defaultLibrary', 'documentation', 'readonly', 'static',
-  'abstract', 'deprecated', 'modification', 'async', 'local'
-];
+export {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES};
 
 
 export const ZINNIA_TOKEN_TYPES_MAP = new Map<string, number>();
