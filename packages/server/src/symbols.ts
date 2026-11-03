@@ -90,3 +90,45 @@ export function documentSymbols(module: Module): DocumentSymbol[] {
   }
   return symbols;
 }
+
+// A symbol of a workspace file, as a DocumentSymbol with the file it's in and
+// the class it's a member of.
+export interface FileSymbol {
+  filePath: string;
+  symbol: DocumentSymbol;
+  containerName?: string;
+}
+
+// Whether [query]'s characters appear in [name] in order, ignoring case, as
+// editors expect of workspace symbol search.
+export function matchesQuery(name: string, query: string): boolean {
+  const lowerName = name.toLowerCase();
+  let i = 0;
+  for (const c of query.toLowerCase()) {
+    i = lowerName.indexOf(c, i);
+    if (i < 0) {
+      return false;
+    }
+    i++;
+  }
+  return true;
+}
+
+// Returns the classes, their members and the functions of [module], in the
+// file at [filePath], whose names match [query].
+export function workspaceSymbols(
+    filePath: string, module: Module, query: string): FileSymbol[] {
+  const result: FileSymbol[] = [];
+  for (const symbol of documentSymbols(module)) {
+    if (matchesQuery(symbol.name, query)) {
+      result.push({filePath: filePath, symbol: symbol});
+    }
+    for (const child of symbol.children ?? []) {
+      if (matchesQuery(child.name, query)) {
+        result.push(
+            {filePath: filePath, symbol: child, containerName: symbol.name});
+      }
+    }
+  }
+  return result;
+}

@@ -224,7 +224,8 @@ const STICKY_RULES: [boolean, RegExp, TokenKind][] = TOKEN_RULES.map(
 
 // Splits [text] into tokens. This never throws: a character that starts no
 // token becomes an UNKNOWN token. Each token's next is the token after it.
-export function tokenize(text: string): Token[] {
+// Comments and spaces are left out unless [keepAll].
+export function tokenize(text: string, keepAll = false): Token[] {
   const tokens: MutableToken[] = [];
   let index = 0, row = 1, col = 1;
   while (index < text.length) {
@@ -253,7 +254,7 @@ export function tokenize(text: string): Token[] {
         colEnd++;
       }
     }
-    if (keep) {
+    if (keep || keepAll) {
       tokens.push({
         kind: bestKind,
         text: tokenText,
@@ -275,4 +276,11 @@ export function tokenize(text: string): Token[] {
     tokens[i].next = tokens[i + 1];
   }
   return tokens;
+}
+
+// Whether [name] is a keyword, such as 'class' or 'True'.
+export function isKeyword(name: string): boolean {
+  const tokens = tokenize(name);
+  return tokens.length === 1 && tokens[0].text === name &&
+      TokenKind[tokens[0].kind].startsWith('KEYWORD_');
 }

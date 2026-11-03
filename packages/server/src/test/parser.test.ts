@@ -16,7 +16,6 @@ function parse(text: string): Module {
 // library.
 const STUB_ANALYZER = {
   searchBuiltinForId: () => undefined,
-  lookupModule: async () => null,
   lookupDocInfoFromModuleName: () => undefined,
 } as unknown as SemanticAnalyzer;
 

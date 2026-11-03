@@ -6,8 +6,9 @@
 
 import {CompletionItem, CompletionItemKind, ParameterInformation, SignatureInformation} from 'vscode-languageserver/node';
 
-import {SemanticDocInfo} from './semantics/analyzer';
+import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ParamExpr} from './semantics/expressions';
+import {NATIVE_CLASSES, NATIVE_FUNCTIONS, nativeMethodsOf} from './semantics/natives';
 import {SemanticClass, SemanticIdentifier, Signature} from './semantics/semantic';
 
 // A member access being typed: `receiver.prefix`.
@@ -117,6 +118,61 @@ export function signatureInformation(
   };
 }
 
+// Describes a native function or method, which has no default values.
+export function nativeSignature(name: string, params: string[]):
+    SignatureInformation {
+  return {
+    label: `${name}(${params.join(', ')})`,
+    parameters: params.map(p => ({label: p})),
+  };
+}
+
+// Describes the function, constructor or method that [id], defined in [info],
+// names, following aliases such as `self.sort = builtin_ext.sort`.
+export function identifierSignature(
+    name: string, id: SemanticIdentifier, info: SemanticDocInfo|undefined,
+    analyzer: SemanticAnalyzer, depth = 0): SignatureInformation|undefined {
+  if (id.signature !== undefined) {
+    return signatureInformation(name, id.signature, info?.text);
+  }
+  const alias = id.aliasOf;
+  if (alias === undefined || depth > 5) {
+    return undefined;
+  }
+  const target = alias.module === undefined ?
+      info :
+      analyzer.lookupDocInfoFromModuleName(alias.module);
+  const definition = [...target?.context?.block.definitions() ?? []].find(
+      d => d.id === alias.name);
+  if (definition !== undefined) {
+    return identifierSignature(name, definition, target, analyzer, depth + 1);
+  }
+  const native = alias.module && NATIVE_FUNCTIONS[alias.module]?.[alias.name];
+  return native ? nativeSignature(name, native) : undefined;
+}
+
+// The name of the class that [cls] extends, if it's written as a name.
+function superclassName(cls: SemanticClass): string|undefined {
+  const sup = cls.ast.super;
+  if (sup?.kind === 'IdentifierExpr') {
+    return sup.token.text;
+  }
+  if (sup?.kind === 'PostfixChainExpr') {
+    const last = sup.postfixes[sup.postfixes.length - 1];
+    return last.kind === 'MemberAccessExpr' ? last.field.token.text : undefined;
+  }
+  return undefined;
+}
+
+// The native methods of [cls] and of the class it extends.
+export function nativeMethodsOfClass(cls: SemanticClass): Record<string, string[]> {
+  const sup = superclassName(cls);
+  return {
+    ...(sup === undefined ? {} : nativeMethodsOf(sup)),
+    ...nativeMethodsOf(cls.name.id),
+  };
+}
+
 function itemFor(id: SemanticIdentifier, text: string|undefined): CompletionItem {
   const item: CompletionItem = {
     label: id.id,
@@ -129,16 +185,37 @@ function itemFor(id: SemanticIdentifier, text: string|undefined): CompletionItem
 }
 
 // The members a module offers: its classes, functions and `self.` members,
-// but not its imports or the variables of its top-level code.
-export function moduleMembers(info: SemanticDocInfo): CompletionItem[] {
-  const items: CompletionItem[] = [];
+// including those defined natively, but not its imports or the variables of
+// its top-level code.
+export function moduleMembers(
+    info: SemanticDocInfo, moduleName: string|undefined,
+    analyzer: SemanticAnalyzer): CompletionItem[] {
+  const items = new Map<string, CompletionItem>();
   for (const id of info.context?.block.definitions() ?? []) {
     if (id.modifiers.includes('local') || id.modifiers.includes('defaultLibrary')) {
       continue;
     }
-    items.push(itemFor(id, info.text));
+    const item = itemFor(id, info.text);
+    item.detail ??= identifierSignature(id.id, id, info, analyzer)?.label;
+    items.set(id.id, item);
   }
-  return items;
+  if (moduleName !== undefined) {
+    for (const [name, params] of Object.entries(NATIVE_FUNCTIONS[moduleName] ?? {})) {
+      if (!items.has(name)) {
+        items.set(name, {
+          label: name,
+          kind: CompletionItemKind.Function,
+          detail: nativeSignature(name, params).label,
+        });
+      }
+    }
+    for (const name of NATIVE_CLASSES[moduleName] ?? []) {
+      if (!items.has(name)) {
+        items.set(name, {label: name, kind: CompletionItemKind.Class});
+      }
+    }
+  }
+  return [...items.values()];
 }
 
 // The fields, statics and methods of [cls].
@@ -163,6 +240,15 @@ export function classMembers(cls: SemanticClass, text: string|undefined):
                   text)
                   .label,
     });
+  }
+  for (const [name, params] of Object.entries(nativeMethodsOfClass(cls))) {
+    if (!items.some(item => item.label === name)) {
+      items.push({
+        label: name,
+        kind: CompletionItemKind.Method,
+        detail: nativeSignature(name, params).label,
+      });
+    }
   }
   return items;
 }

@@ -1,13 +1,19 @@
-import {CompletionItem, CompletionItemKind, createConnection, Definition, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CodeAction, CodeActionKind, CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
-import {callAt, classAt, classMembers, memberAccessAt, moduleMembers, signatureInformation} from './completion';
+import {DiagnosticData, quickFixes} from './codeActions';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, signatureInformation} from './completion';
+import {foldingRanges} from './folding';
+import {formatText} from './format';
 import {loadZinniaLibs} from './lib';
-import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
+import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
+import {ImportStat} from './semantics/statements';
+import {NATIVE_FUNCTIONS, NATIVE_METHODS} from './semantics/natives';
 import {SemanticClass, SemanticToken} from './semantics/semantic';
-import {documentSymbols} from './symbols';
+import {invalidName, renameLocations, renameTarget} from './rename';
+import {documentSymbols, workspaceSymbols} from './symbols';
 
 const KEYWORDS = [
   'and',    'as',     'async',  'await',  'break', 'catch',  'class',
@@ -56,7 +62,10 @@ function isOnToken(position: Position, token: SemanticToken): boolean {
 
 function tokenAt(info: SemanticDocInfo, position: Position): SemanticToken|
     undefined {
-  return info.tokens.find(token => isOnToken(position, token));
+  // Prefer a token that refers to an identifier: `self.x = ...` has one for
+  // the module member and one for the member access.
+  const tokens = info.tokens.filter(token => isOnToken(position, token));
+  return tokens.find(token => token.identifier !== undefined) ?? tokens[0];
 }
 
 function locationOf(filePath: string, row: number, col: number, length: number):
@@ -135,10 +144,15 @@ function loadLibs(libraryPath: string|undefined) {
   return loadZinniaLibs();
 }
 
+// Whether the client can be asked to watch files for the server.
+let canWatchFiles = false;
+
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   const libraryPath = params.initializationOptions?.libraryPath as string |
       undefined;
   analyzer.init(params.workspaceFolders ?? [], () => loadLibs(libraryPath));
+  canWatchFiles = params.capabilities.workspace?.didChangeWatchedFiles
+                      ?.dynamicRegistration === true;
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -153,10 +167,47 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       definitionProvider: true,
       referencesProvider: true,
       documentSymbolProvider: true,
+      workspaceSymbolProvider: true,
+      renameProvider: {prepareProvider: true},
+      foldingRangeProvider: true,
+      documentFormattingProvider: true,
+      codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
     },
   };
+});
+
+connection.onInitialized(async () => {
+  if (canWatchFiles) {
+    // Hear about Zinnia files that change outside the editor, e.g. on a
+    // checkout.
+    connection.client.register(
+        DidChangeWatchedFilesNotification.type,
+        {watchers: [{globPattern: '**/*.zn'}]});
+  }
+  const start = Date.now();
+  const count = await analyzer.indexWorkspace();
+  connection.console.log(
+      `Indexed ${count} Zinnia files in ${Date.now() - start} ms.`);
+});
+
+connection.onDidChangeWatchedFiles(params => {
+  for (const change of params.changes) {
+    const filePath = filePathOf(change.uri);
+    if (!filePath.endsWith('.zn')) {
+      continue;
+    }
+    if (change.type === FileChangeType.Deleted) {
+      analyzer.forgetFile(filePath);
+    } else {
+      analyzer.refreshFile(filePath);
+    }
+  }
+});
+
+documents.onDidOpen(event => {
+  analyzer.setOpen(filePathOf(event.document.uri), true);
 });
 
 documents.onDidChangeContent(async change => {
@@ -180,6 +231,10 @@ documents.onDidChangeContent(async change => {
       },
       message: problem.message,
       source: 'zinnia',
+      code: problem.code,
+      data: problem.declaration === undefined ?
+          undefined :
+          {declaration: problem.declaration} satisfies DiagnosticData,
     };
   });
   connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});
@@ -187,6 +242,7 @@ documents.onDidChangeContent(async change => {
 
 documents.onDidClose(event => {
   analyses.delete(event.document.uri);
+  analyzer.setOpen(filePathOf(event.document.uri), false);
   connection.sendDiagnostics({uri: event.document.uri, diagnostics: []});
 });
 
@@ -263,7 +319,8 @@ async function memberCompletions(
   const imprt = info.module?.imports.find(i => i.name.id === receiver);
   if (imprt !== undefined) {
     const module = await analyzer.importedModule(info.path, imprt);
-    return module === undefined ? [] : moduleMembers(module);
+    return module === undefined ? [] :
+                                  moduleMembers(module, moduleNameOf(imprt.ast), analyzer);
   }
   // The receiver's class isn't known, so offer the members of all known
   // classes.
@@ -272,6 +329,17 @@ async function memberCompletions(
     for (const item of classMembers(cls, text)) {
       if (!items.has(item.label)) {
         items.set(item.label, item);
+      }
+    }
+  }
+  for (const methods of Object.values(NATIVE_METHODS)) {
+    for (const [name, params] of Object.entries(methods)) {
+      if (!items.has(name)) {
+        items.set(name, {
+          label: name,
+          kind: CompletionItemKind.Method,
+          detail: nativeSignature(name, params).label,
+        });
       }
     }
   }
@@ -308,11 +376,20 @@ async function signatureFor(
     line: number): Promise<SignatureInformation|undefined> {
   const methodOf = (cls: SemanticClass|undefined, text: string) => {
     const method = cls?.methods.get(name);
-    return method && signatureInformation(
-        name, {params: method.ast.params, isNamed: method.ast.isNamed}, text);
+    if (method !== undefined) {
+      return signatureInformation(
+          name, {params: method.ast.params, isNamed: method.ast.isNamed}, text);
+    }
+    const native = cls && nativeMethodsOfClass(cls)[name];
+    return native && nativeSignature(name, native);
   };
   if (receiver === 'self') {
-    return methodOf(classAt(info, line), info.text);
+    const cls = classAt(info, line);
+    if (cls !== undefined) {
+      return methodOf(cls, info.text);
+    }
+    // At the top level, `self` is the module.
+    receiver = undefined;
   }
   if (receiver !== undefined) {
     const imprt = info.module?.imports.find(i => i.name.id === receiver);
@@ -320,31 +397,49 @@ async function signatureFor(
       const module = await analyzer.importedModule(info.path, imprt);
       const id = module &&
           [...module.context?.block.definitions() ?? []].find(d => d.id === name);
-      return id?.signature &&
-          signatureInformation(name, id.signature, module!.text);
+      if (id !== undefined) {
+        return identifierSignature(name, id, module, analyzer);
+      }
+      const native = NATIVE_FUNCTIONS[moduleNameOf(imprt.ast) ?? '']?.[name];
+      return native && nativeSignature(name, native);
     }
     // The receiver's class isn't known: use the first known class with a
-    // method of this name.
+    // method of this name, then the first native one.
     for (const {cls, text} of knownClasses(info)) {
       const signature = methodOf(cls, text);
       if (signature !== undefined) {
         return signature;
       }
     }
+    for (const methods of Object.values(NATIVE_METHODS)) {
+      if (methods[name] !== undefined) {
+        return nativeSignature(name, methods[name]);
+      }
+    }
     return undefined;
   }
   const local =
       [...info.context?.block.definitions() ?? []].find(d => d.id === name);
-  if (local?.signature !== undefined) {
-    return signatureInformation(name, local.signature, info.text);
+  const localSignature =
+      local && identifierSignature(name, local, info, analyzer);
+  if (localSignature !== undefined) {
+    return localSignature;
   }
   const builtin = analyzer.searchBuiltinForId(name);
-  if (builtin?.signature !== undefined) {
-    return signatureInformation(
-        name, builtin.signature,
-        analyzer.lookupDocInfoFromModuleName('builtin')?.text);
+  const builtinSignature = builtin &&
+      identifierSignature(
+          name, builtin, analyzer.lookupDocInfoFromModuleName('builtin'),
+          analyzer);
+  if (builtinSignature !== undefined) {
+    return builtinSignature;
   }
-  return undefined;
+  const native = NATIVE_FUNCTIONS.builtin[name];
+  return native && nativeSignature(name, native);
+}
+
+// The name of the module [imprt] imports, unless it's given as a path.
+function moduleNameOf(imprt: ImportStat): string|undefined {
+  return imprt.source.kind === 'StringExpr' ? undefined : imprt.source.token.text;
 }
 
 connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
@@ -365,6 +460,103 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
     activeParameter: Math.min(
         call!.argIndex, Math.max(0, (signature.parameters?.length ?? 1) - 1)),
   };
+});
+
+connection.onPrepareRename(async (params): Promise<PrepareRenameResult|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const target = renameTarget(info && tokenAt(info, params.position), analyzer);
+  if ('error' in target) {
+    throw new ResponseError(ErrorCodes.InvalidRequest, target.error);
+  }
+  return {
+    range: {
+      start: {line: target.token.row, character: target.token.col},
+      end: {
+        line: target.token.row,
+        character: target.token.col + target.token.text.length,
+      },
+    },
+    placeholder: target.id.id,
+  };
+});
+
+connection.onRenameRequest(async (params): Promise<WorkspaceEdit|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const target = renameTarget(info && tokenAt(info, params.position), analyzer);
+  if ('error' in target) {
+    throw new ResponseError(ErrorCodes.InvalidRequest, target.error);
+  }
+  const error = invalidName(params.newName);
+  if (error !== undefined) {
+    throw new ResponseError(ErrorCodes.InvalidParams, error);
+  }
+  const changes: Record<string, TextEdit[]> = {};
+  for (const loc of renameLocations(target, analyzer.analyzedDocuments())) {
+    const location = locationOf(loc.filePath, loc.row, loc.col, loc.length);
+    if (location !== undefined) {
+      (changes[location.uri] ??= [])
+          .push({range: location.range, newText: params.newName});
+    }
+  }
+  return {changes: changes};
+});
+
+connection.onWorkspaceSymbol(async (params): Promise<WorkspaceSymbol[]> => {
+  const symbols: WorkspaceSymbol[] = [];
+  for (const doc of analyzer.analyzedDocuments()) {
+    if (doc.module === undefined || analyzer.isStandardLibraryFile(doc.path)) {
+      continue;
+    }
+    for (const {filePath, symbol, containerName} of workspaceSymbols(
+             doc.path, doc.module.ast, params.query)) {
+      const location = locationOf(
+          filePath, symbol.selectionRange.start.line,
+          symbol.selectionRange.start.character,
+          symbol.selectionRange.end.character -
+              symbol.selectionRange.start.character);
+      if (location !== undefined) {
+        symbols.push({
+          name: symbol.name,
+          kind: symbol.kind,
+          location: location,
+          containerName: containerName,
+        });
+      }
+    }
+  }
+  return symbols;
+});
+
+connection.onFoldingRanges(params => {
+  const document = documents.get(params.textDocument.uri);
+  return document === undefined ? [] : foldingRanges(document.getText());
+});
+
+connection.onDocumentFormatting(params => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return [];
+  }
+  const text = document.getText();
+  const formatted = formatText(text, params.options);
+  if (formatted === text) {
+    return [];
+  }
+  return [{
+    range: {start: {line: 0, character: 0}, end: document.positionAt(text.length)},
+    newText: formatted,
+  }];
+});
+
+connection.onCodeAction(async (params): Promise<CodeAction[]> => {
+  const info = await analysisFor(params.textDocument.uri);
+  if (info === undefined) {
+    return [];
+  }
+  return quickFixes(
+      info, params.textDocument.uri,
+      params.context.diagnostics.filter(d => d.source === 'zinnia'),
+      name => analyzer.isImportable(info.path, name));
 });
 
 documents.listen(connection);

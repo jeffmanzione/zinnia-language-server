@@ -2,6 +2,7 @@
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
 import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
+import {NATIVE_CLASSES, NATIVE_FUNCTIONS, NATIVE_METHODS} from './natives';
 import {Token, TokenKind} from './tokenizer';
 
 export interface SemanticToken {
@@ -19,7 +20,7 @@ export interface SemanticToken {
 type IdType =
     |'variable'|'property'|'parameter'|'function'|'method'|'class'|'decorator';
 
-interface TokenFile {
+export interface TokenFile {
   token: Token;
   filePath: string;
 }
@@ -38,6 +39,11 @@ export class SemanticIdentifier {
   isConst = false;
   // The parameters of a function, or of a class's constructor.
   signature?: Signature;
+  // For a module member defined as another name, e.g. `self.sort =
+  // builtin_ext.sort`: that name, and the module it's in if not this one.
+  aliasOf?: {module?: string, name: string};
+  // For the name an import defines: the module it imports, as written.
+  importSource?: {name: string, isPath: boolean};
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -68,7 +74,7 @@ export interface Signature {
 }
 
 // Follows an identifier's forward to the identifier it was resolved to.
-function resolved(id: SemanticIdentifier): SemanticIdentifier {
+export function resolved(id: SemanticIdentifier): SemanticIdentifier {
   while (id.forward !== undefined) {
     id = id.forward;
   }
@@ -82,6 +88,29 @@ export interface SemanticProblem {
   row: number;
   col: number;
   length: number;
+  // What kind of problem this is, for the problems that have quick fixes.
+  code?: ProblemCode;
+  // For a hidden top-level variable: where it's declared, 0-based.
+  declaration?: {row: number, col: number};
+}
+
+export type ProblemCode = 'undefined-name'|'hidden-top-level-variable';
+
+function hiddenTopLevelVariableProblem(
+    use: Token, found: SemanticIdentifier): SemanticProblem {
+  const declaration = resolved(found).tokens[0]?.token;
+  return {
+    ...problemAt(
+        use,
+        `'${use.text}' is a variable of the module's top-level code, which ` +
+            `functions and methods can't see; make it a module member with ` +
+            `'self.${use.text} = ...'.`),
+    code: 'hidden-top-level-variable',
+    declaration: declaration && {
+      row: declaration.pos.rowBegin - 1,
+      col: declaration.pos.columnBegin - 1,
+    },
+  };
 }
 
 function problemAt(
@@ -99,18 +128,15 @@ function problemAt(
 // Names that are always defined: module-level globals and names defined
 // natively in builtin rather than in builtin.zn.
 const GLOBAL_NAMES = new Set([
-  'self', 'args', '__main', 'Int', 'Float', 'Bool', 'Char', 'color', 'is_int',
-  'is_float', 'is_bool', '__stringify', '__tuple', '__collect_garbage', 'Range',
-  'Isolate', 'ActorRef', 'Frame', 'Scope', 'Object', 'Class', 'Function',
-  'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple', 'Error',
-  'Future',
+  'self', 'args', '__main', 'Char', 'Frame', 'Scope', 'Object', 'Class',
+  'Function', 'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple',
+  'Error', 'Future', ...Object.keys(NATIVE_FUNCTIONS.builtin),
+  ...NATIVE_CLASSES.builtin,
 ]);
 
-// Native methods every object has, which methods can call without `self.`.
-const OBJECT_MEMBERS = new Set([
-  'class', 'super', 'hash', 'copy', '$get', '$set', '$adr', '$hex_addr',
-  'to_s',
-]);
+// Methods every object has, which methods can call without `self.`.
+const OBJECT_MEMBERS =
+    new Set([...Object.keys(NATIVE_METHODS.Object), 'to_s']);
 
 // Native methods of a module, which its top-level code can call unqualified.
 const MODULE_MEMBERS = new Set(['name', 'functions', 'classes']);
@@ -442,11 +468,7 @@ class Block {
     const found = this.findScoped(name.text);
     if (found !== undefined) {
       if (isHiddenTopLevelVariable(found)) {
-        this.file.problems.push(problemAt(
-            name,
-            `'${name.text}' is a variable of the module's top-level code, ` +
-                `which functions and methods can't see; make it a module ` +
-                `member with 'self.${name.text} = ...'.`));
+        this.file.problems.push(hiddenTopLevelVariableProblem(name, found.id));
       }
       return found.id;
     }
@@ -562,12 +584,16 @@ export class SemanticContext {
     this.module = module;
   }
 
-  async lookupModule(name: string): Promise<SemanticModule|null> {
-    return this.analyzer.lookupModule(name);
-  }
 
   lookupDocInfo(moduleName: string): SemanticDocInfo|null {
     return this.analyzer.lookupDocInfoFromModuleName(moduleName) ?? null;
+  }
+
+  // The analysis of the module an import in this file names, if it has been
+  // analyzed.
+  lookupImportedDocInfo(source: {name: string, isPath: boolean}):
+      SemanticDocInfo|undefined {
+    return this.analyzer.analyzedImport(this.filePath, source.name, source.isPath);
   }
 
   newBlock(
@@ -731,6 +757,10 @@ function generateTokensForAnnotation(
 
 function lookupMemberFromPossibleModule(
     possibleModule: SemanticIdentifier, tok: Token, context: SemanticContext) {
+  if (possibleModule?.importSource !== undefined) {
+    return context.lookupImportedDocInfo(possibleModule.importSource)
+        ?.context?.block.findIdentifier(tok.text);
+  }
   if (possibleModule && possibleModule.type === 'variable' &&
       possibleModule.modifiers.includes('defaultLibrary')) {
     return context.lookupDocInfo(possibleModule.id)
@@ -1414,11 +1444,39 @@ function processAssignLhs(
 
 function processAssign(
     expr: AssignBaseExpr, context: SemanticContext): SemanticAssign {
-  return {
+  const assign = {
     ast: expr,
     lhs: processAssignLhs(expr.lhs, context),
     rhs: processExpression(expr.rhs, context)
   };
+  recordAlias(expr, context);
+  return assign;
+}
+
+// Records that a module member defined as another name, as in `self.sort =
+// builtin_ext.sort` or `self.f = g`, is an alias of it.
+function recordAlias(expr: AssignBaseExpr, context: SemanticContext): void {
+  const lhs = expr.lhs;
+  if (context.block.kind !== 'module' || lhs.kind !== 'PostfixChainExpr' ||
+      lhs.lhs.kind !== 'IdentifierExpr' || lhs.lhs.token.text !== 'self' ||
+      lhs.postfixes.length !== 1 || lhs.postfixes[0].kind !== 'MemberAccessExpr') {
+    return;
+  }
+  const member = context.block.findScoped(lhs.postfixes[0].field.token.text)?.id;
+  const rhs = expr.rhs;
+  if (member === undefined) {
+    return;
+  }
+  if (rhs.kind === 'IdentifierExpr') {
+    member.aliasOf = {name: rhs.token.text};
+  } else if (
+      rhs.kind === 'PostfixChainExpr' && rhs.lhs.kind === 'IdentifierExpr' &&
+      rhs.postfixes.length === 1 && rhs.postfixes[0].kind === 'MemberAccessExpr') {
+    member.aliasOf = {
+      module: rhs.lhs.token.text,
+      name: rhs.postfixes[0].field.token.text,
+    };
+  }
 }
 
 function processFunction(
@@ -1519,6 +1577,18 @@ function processStatement(
 }
 
 function createImportName(
+    stat: ImportStat, context: SemanticContext): SemanticIdentifier {
+  const id = createImportName_(stat, context);
+  const isPath = stat.source.kind === 'StringExpr';
+  id.importSource = {
+    name: isPath ? stat.source.token.text.replace(/^i?'|'$/g, '') :
+                   stat.source.token.text,
+    isPath: isPath,
+  };
+  return id;
+}
+
+function createImportName_(
     stat: ImportStat, context: SemanticContext): SemanticIdentifier {
   let name: string;
   if (stat.name == null) {
@@ -1742,11 +1812,7 @@ function resolveUnresolvedNames(
       found.id.tokens.push(...unresolved.id.tokens);
       if (isHiddenTopLevelVariable(found)) {
         for (const use of unresolved.uses) {
-          file.problems.push(problemAt(
-              use,
-              `'${use.text}' is a variable of the module's top-level code, ` +
-                  `which functions and methods can't see; make it a module ` +
-                  `member with 'self.${use.text} = ...'.`));
+          file.problems.push(hiddenTopLevelVariableProblem(use, found.id));
         }
       }
       continue;
@@ -1755,7 +1821,10 @@ function resolveUnresolvedNames(
       continue;
     }
     for (const use of unresolved.uses) {
-      file.problems.push(problemAt(use, `'${use.text}' is not defined.`));
+      file.problems.push({
+        ...problemAt(use, `'${use.text}' is not defined.`),
+        code: 'undefined-name',
+      });
     }
   }
 }

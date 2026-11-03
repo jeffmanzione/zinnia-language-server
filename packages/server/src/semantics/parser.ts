@@ -23,6 +23,10 @@ export interface ParseProblem {
   // How many characters the problem spans, if more than one.
   length?: number;
   severity?: 'error'|'warning';
+  // What kind of problem this is, for the problems that have quick fixes.
+  code?: string;
+  // For a hidden top-level variable: where it's declared, 0-based.
+  declaration?: {row: number, col: number};
 }
 
 export interface ParseResult {

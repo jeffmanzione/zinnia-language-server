@@ -1,8 +1,9 @@
 import * as assert from 'node:assert/strict';
 import {describe, it} from 'node:test';
 
-import {callAt, classAt, classMembers, memberAccessAt, moduleMembers, signatureInformation} from '../completion';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, signatureInformation} from '../completion';
 import {SemanticAnalyzer} from '../semantics/analyzer';
+import {NATIVE_METHODS} from '../semantics/natives';
 
 // Returns [text] without its '|', and the offset of the '|'.
 function cursor(text: string): [string, number] {
@@ -52,15 +53,15 @@ describe('member completion and signatures', () => {
     '',
   ].join('\n');
 
+  const analyzer = new SemanticAnalyzer();
   async function analyze() {
-    const analyzer = new SemanticAnalyzer();
     await analyzer.init([], async () => []);
     return analyzer.parseDocument(
         {textDocument: {uri: 'file:///completion.zn'}, text: text});
   }
 
   it('lists a module\'s members but not its top-level variables', async () => {
-    const labels = moduleMembers(await analyze()).map(i => i.label).sort();
+    const labels = moduleMembers(await analyze(), undefined, analyzer).map(i => i.label).sort();
     assert.deepEqual(labels, ['LIMIT', 'Point', 'make']);
   });
 
@@ -69,7 +70,9 @@ describe('member completion and signatures', () => {
     const cls = classAt(info, 3)!;
     assert.equal(cls.name.id, 'Point');
     assert.deepEqual(
-        classMembers(cls, info.text).map(i => [i.label, i.detail]),
+        classMembers(cls, info.text)
+            .filter(i => !(i.label in NATIVE_METHODS.Object))
+            .map(i => [i.label, i.detail]),
         [
           ['label', undefined], ['x', undefined], ['y', undefined],
           ['ORIGIN', undefined], ['norm', 'norm(scale, offset = x + 1)'],
@@ -87,5 +90,43 @@ describe('member completion and signatures', () => {
     assert.equal(
         signatureInformation('Point', point.signature!, info.text).label,
         'Point(x, y = 0)');
+  });
+});
+
+describe('native members and aliases', () => {
+  const LIBS = [
+    {name: 'builtin', path: '/stdlib/builtin.zn',
+     text: 'import builtin_ext\nclass String {}\nself.sort = builtin_ext.sort\n'},
+    {name: 'builtin_ext', path: '/stdlib/builtin_ext.zn',
+     text: 'function sort(seq, cmp = 1) seq\n'},
+    {name: 'math', path: '/stdlib/math.zn', text: 'function sqrt(x) x\n'},
+  ];
+  const analyzer = new SemanticAnalyzer();
+
+  it('lists native functions of a module', async () => {
+    await analyzer.init([], async () => LIBS);
+    const math = analyzer.lookupDocInfoFromModuleName('math')!;
+    const items = moduleMembers(math, 'math', analyzer);
+    assert.equal(items.find(i => i.label === 'pow')?.detail, 'pow(num, power)');
+    assert.equal(items.find(i => i.label === 'sqrt')?.detail, 'sqrt(x)');
+  });
+
+  it('lists native methods of a class', async () => {
+    const builtin = analyzer.lookupDocInfoFromModuleName('builtin')!;
+    const string = builtin.module!.classes.find(c => c.name.id === 'String')!;
+    const items = classMembers(string, builtin.text);
+    assert.equal(items.find(i => i.label === 'split')?.detail, 'split(delim)');
+    assert.equal(items.find(i => i.label === 'hash')?.detail, 'hash()');
+  });
+
+  it('follows aliases to their signature', async () => {
+    const builtin = analyzer.lookupDocInfoFromModuleName('builtin')!;
+    const sort = analyzer.searchBuiltinForId('sort')!;
+    assert.equal(
+        identifierSignature('sort', sort, builtin, analyzer)?.label,
+        'sort(seq, cmp = 1)');
+    const items = moduleMembers(builtin, 'builtin', analyzer);
+    assert.equal(items.find(i => i.label === 'sort')?.detail, 'sort(seq, cmp = 1)');
+    assert.equal(items.find(i => i.label === 'Int')?.detail, 'Int(x)');
   });
 });

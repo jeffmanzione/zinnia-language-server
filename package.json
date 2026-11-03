@@ -35,6 +35,12 @@
 				"configuration": "./packages/shared/src/language-configuration.json"
 			}
 		],
+		"configurationDefaults": {
+			"[zinnia]": {
+				"editor.tabSize": 2,
+				"editor.insertSpaces": true
+			}
+		},
 		"grammars": [
 			{
 				"language": "zinnia",
