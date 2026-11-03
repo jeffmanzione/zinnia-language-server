@@ -88,6 +88,29 @@ export interface SemanticProblem {
   row: number;
   col: number;
   length: number;
+  // What kind of problem this is, for the problems that have quick fixes.
+  code?: ProblemCode;
+  // For a hidden top-level variable: where it's declared, 0-based.
+  declaration?: {row: number, col: number};
+}
+
+export type ProblemCode = 'undefined-name'|'hidden-top-level-variable';
+
+function hiddenTopLevelVariableProblem(
+    use: Token, found: SemanticIdentifier): SemanticProblem {
+  const declaration = resolved(found).tokens[0]?.token;
+  return {
+    ...problemAt(
+        use,
+        `'${use.text}' is a variable of the module's top-level code, which ` +
+            `functions and methods can't see; make it a module member with ` +
+            `'self.${use.text} = ...'.`),
+    code: 'hidden-top-level-variable',
+    declaration: declaration && {
+      row: declaration.pos.rowBegin - 1,
+      col: declaration.pos.columnBegin - 1,
+    },
+  };
 }
 
 function problemAt(
@@ -445,11 +468,7 @@ class Block {
     const found = this.findScoped(name.text);
     if (found !== undefined) {
       if (isHiddenTopLevelVariable(found)) {
-        this.file.problems.push(problemAt(
-            name,
-            `'${name.text}' is a variable of the module's top-level code, ` +
-                `which functions and methods can't see; make it a module ` +
-                `member with 'self.${name.text} = ...'.`));
+        this.file.problems.push(hiddenTopLevelVariableProblem(name, found.id));
       }
       return found.id;
     }
@@ -1793,11 +1812,7 @@ function resolveUnresolvedNames(
       found.id.tokens.push(...unresolved.id.tokens);
       if (isHiddenTopLevelVariable(found)) {
         for (const use of unresolved.uses) {
-          file.problems.push(problemAt(
-              use,
-              `'${use.text}' is a variable of the module's top-level code, ` +
-                  `which functions and methods can't see; make it a module ` +
-                  `member with 'self.${use.text} = ...'.`));
+          file.problems.push(hiddenTopLevelVariableProblem(use, found.id));
         }
       }
       continue;
@@ -1806,7 +1821,10 @@ function resolveUnresolvedNames(
       continue;
     }
     for (const use of unresolved.uses) {
-      file.problems.push(problemAt(use, `'${use.text}' is not defined.`));
+      file.problems.push({
+        ...problemAt(use, `'${use.text}' is not defined.`),
+        code: 'undefined-name',
+      });
     }
   }
 }

@@ -155,6 +155,12 @@ export class SemanticAnalyzer {
         .find(filePath => this.docs_.has(filePath) || existsSync(filePath));
   }
 
+  // Whether the file at [fromPath] can import a module named [name].
+  isImportable(fromPath: string, name: string): boolean {
+    return this.libNamesToFilePaths_.has(name) ||
+        this.workspaceImportPath_(fromPath, name, false) !== undefined;
+  }
+
   // Analyzes every Zinnia file in the workspace that isn't open or part of the
   // standard library, each after the workspace modules it imports, so that
   // references, rename and workspace symbols cover the whole workspace.

@@ -1,9 +1,12 @@
-import {CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CodeAction, CodeActionKind, CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
+import {DiagnosticData, quickFixes} from './codeActions';
 import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, signatureInformation} from './completion';
+import {foldingRanges} from './folding';
+import {formatText} from './format';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
@@ -166,6 +169,9 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       documentSymbolProvider: true,
       workspaceSymbolProvider: true,
       renameProvider: {prepareProvider: true},
+      foldingRangeProvider: true,
+      documentFormattingProvider: true,
+      codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
     },
@@ -225,6 +231,10 @@ documents.onDidChangeContent(async change => {
       },
       message: problem.message,
       source: 'zinnia',
+      code: problem.code,
+      data: problem.declaration === undefined ?
+          undefined :
+          {declaration: problem.declaration} satisfies DiagnosticData,
     };
   });
   connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});
@@ -515,6 +525,38 @@ connection.onWorkspaceSymbol(async (params): Promise<WorkspaceSymbol[]> => {
     }
   }
   return symbols;
+});
+
+connection.onFoldingRanges(params => {
+  const document = documents.get(params.textDocument.uri);
+  return document === undefined ? [] : foldingRanges(document.getText());
+});
+
+connection.onDocumentFormatting(params => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return [];
+  }
+  const text = document.getText();
+  const formatted = formatText(text, params.options);
+  if (formatted === text) {
+    return [];
+  }
+  return [{
+    range: {start: {line: 0, character: 0}, end: document.positionAt(text.length)},
+    newText: formatted,
+  }];
+});
+
+connection.onCodeAction(async (params): Promise<CodeAction[]> => {
+  const info = await analysisFor(params.textDocument.uri);
+  if (info === undefined) {
+    return [];
+  }
+  return quickFixes(
+      info, params.textDocument.uri,
+      params.context.diagnostics.filter(d => d.source === 'zinnia'),
+      name => analyzer.isImportable(info.path, name));
 });
 
 documents.listen(connection);
