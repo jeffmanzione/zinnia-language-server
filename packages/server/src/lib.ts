@@ -1,41 +1,30 @@
-import {DirEntry} from './interfaces';
+import {readdirSync, readFileSync} from 'fs';
+import * as path from 'path';
 
-const ZINNIA_GITHUB_REPO = 'jeffmanzione/zinnia';
-
-export interface FileContents {
-  uri: string;
+// A module of the Zinnia standard library.
+export interface LibFile {
+  // The module's name, e.g. 'io'.
+  name: string;
+  // The absolute path of its source.
+  path: string;
   text: string;
 }
 
-const fetchLibPaths_ = async(): Promise<string[]> => {
-  const resp = await fetch(
-      `https://api.github.com/repos/${ZINNIA_GITHUB_REPO}/contents/zinnia/lib`);
-  const data = (await resp.json()) as DirEntry[];
+// The copy of the standard library bundled with the server. See
+// scripts/update-stdlib.sh.
+export const BUNDLED_LIB_DIR = path.join(__dirname, '..', 'stdlib');
 
-  const libFilePaths: string[] = [];
-
-  for (const entry of data) {
-    if (entry.name.endsWith('.zn')) {
-      libFilePaths.push(entry.path);
-    }
-  }
-  return libFilePaths;
-};
-
-const fetchFileContents_ = async(filePath: string): Promise<FileContents> => {
-  const libUrl = `https://raw.githubusercontent.com/${
-      ZINNIA_GITHUB_REPO}/refs/heads/master/${filePath}`;
-  try {
-    const resp = await fetch(libUrl, {signal: AbortSignal.timeout(30000)});
-    return {uri: filePath, text: await resp.text()};
-  } catch (e: any) {
-    console.error(libUrl);
-    console.error(e);
-    return {uri: filePath, text: ''};
-  }
-};
-
-export const fetchZinniaLibs = async(): Promise<FileContents[]> => {
-  return Promise.all(await fetchLibPaths_().then(
-      filePaths => filePaths.map(path => fetchFileContents_(path))));
-};
+// Reads the standard library's modules from [dir], which defaults to the
+// bundled copy.
+export function loadZinniaLibs(dir: string = BUNDLED_LIB_DIR): LibFile[] {
+  return readdirSync(dir)
+      .filter(file => file.endsWith('.zn'))
+      .map(file => {
+        const filePath = path.join(dir, file).replace(/\\/g, '/');
+        return {
+          name: file.slice(0, -'.zn'.length),
+          path: filePath,
+          text: readFileSync(filePath, 'utf8'),
+        };
+      });
+}

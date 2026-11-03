@@ -4,6 +4,7 @@ import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {callAt, classAt, classMembers, memberAccessAt, moduleMembers, signatureInformation} from './completion';
+import {loadZinniaLibs} from './lib';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {SemanticClass, SemanticToken} from './semantics/semantic';
 import {documentSymbols} from './symbols';
@@ -118,8 +119,26 @@ function encodeTokens(tokens: SemanticToken[]): SemanticTokens {
   return builder.build();
 }
 
+// Reads the standard library from the configured directory, or the bundled
+// copy if none is configured or it can't be read.
+function loadLibs(libraryPath: string|undefined) {
+  if (libraryPath) {
+    try {
+      return loadZinniaLibs(libraryPath);
+    } catch (e) {
+      console.error(
+          `Could not read the standard library from ${libraryPath}; using ` +
+              'the bundled copy.',
+          e);
+    }
+  }
+  return loadZinniaLibs();
+}
+
 connection.onInitialize((params: InitializeParams): InitializeResult => {
-  analyzer.init(params.workspaceFolders ?? []);
+  const libraryPath = params.initializationOptions?.libraryPath as string |
+      undefined;
+  analyzer.init(params.workspaceFolders ?? [], () => loadLibs(libraryPath));
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,

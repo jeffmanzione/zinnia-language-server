@@ -62,6 +62,12 @@
 					],
 					"default": "off",
 					"description": "Traces the communication between VS Code and the language server."
+				},
+				"zinnia.libraryPath": {
+					"scope": "machine-overridable",
+					"type": "string",
+					"default": "",
+					"description": "The directory of the Zinnia standard library to use, e.g. zinnia/lib in a checkout of zinnia. By default, the copy bundled with the extension is used. Restart the extension after changing this."
 				}
 			}
 		}

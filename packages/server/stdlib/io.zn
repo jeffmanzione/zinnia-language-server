@@ -1,0 +1,95 @@
+import io_ext
+import struct
+
+self.IN = FileReader(i'__STDIN__', True)
+self.OUT = FileWriter(i'__STDOUT__', True)
+self.ERROR = FileWriter(i'__STDERR__', True)
+
+class _FileInternal {
+  field file
+  new(fn, rw, a, binary) {
+    ; Appending opens with 'a' since 'w' truncates the file.
+    mode = cat(if a then i'a' else rw)
+    if binary {
+      mode.extend('b')
+    }
+    file = __File(fn, mode)
+  }
+  method gets(n) await file.__gets(n)
+  method getline() await file.__getline()
+  method getall() await file.__getall()
+  ; Returns the remaining lines of the file, without line terminators.
+  method getlines() {
+    lines = []
+    while True {
+      line = getline()
+      if ~line {
+        return lines
+      }
+      ; Strip the line terminator.
+      if line.ends_with('\n') {
+        line = line.substr(0, line.len() - 1)
+      }
+      if line.ends_with('\r') {
+        line = line.substr(0, line.len() - 1)
+      }
+      lines.append(line)
+    }
+  }
+  method puts(s) await file.__puts(s)
+  method close() await file.__close()
+}
+
+class FileReader {
+  field fi
+  new(fn, binary=False) {
+    fi = _FileInternal(fn, i'r', False, binary)
+  }
+  method close() fi.close()
+  method gets(n) fi.gets(n)
+  method getline() fi.getline()
+  method getlines() fi.getlines()
+  method getall() fi.getall()
+}
+
+class FileWriter {
+  field fi
+  new(fn, append=False, binary=False) {
+    fi = _FileInternal(fn, i'w', append, binary)
+  }
+  method write(s) fi.puts(s)
+  method writeln(s) {
+    fi.puts(s)
+    fi.puts('\n')
+  }
+  method close() fi.close()
+}
+
+function fprint(f, a) {
+  f.write(str(a))
+}
+
+function fprintln(f, a) {
+  f.writeln(str(a))
+}
+
+function print(a) {
+  fprint(OUT, a)
+}
+
+function println(a) {
+  fprintln(OUT, a)
+}
+
+function error(a) {
+  fprint(ERROR, a)
+}
+
+function errorln(a) {
+  fprintln(ERROR, a)
+}
+
+/*
+self.FileEvent = io_ext.FileEvent
+self.FileWatcher = io_ext.FileWatcher
+*/

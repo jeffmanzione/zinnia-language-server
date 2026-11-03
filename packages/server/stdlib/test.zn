@@ -1,0 +1,141 @@
+import error
+import io
+
+class TestClass {
+  method annotate(cls) {}
+}
+
+class Test {
+  method annotate(cls) {}
+}
+
+class SetUp {
+  method annotate(cls) {}
+}
+
+class TearDown {
+  method annotate(cls) {}
+}
+
+class ExpectError : error.Error {
+  new(str) {
+    super(error.Error)(str)
+  }
+}
+
+function expect(actual, expected) {
+  try {
+    if actual == expected {
+      return
+    }
+  } catch e {}
+  raise ExpectError('Expected \'' + str(expected) + '\' but was \'' + str(actual) + '\'.')
+}
+
+function expect_not(actual, not_expected) {
+  try {
+    if actual != not_expected {
+      return
+    }
+  } catch e {}
+  raise ExpectError('Expected not \'' + str(not_expected) + '\' but was \'' + str(actual) + '\'.')
+}
+
+function expect_raises(exp, error_class=None) {
+  try {
+    exp()
+  } catch e {
+    if ~e or ~error_class or (e is error_class) {
+      return
+    }
+    raise ExpectError('Raises wrong error')
+  }
+  raise ExpectError('Does not raise')
+}
+
+function expect_is(actual, expected_class) {
+  try {
+    if actual is expected_class {
+      return
+    }
+  } catch e {}
+  raise ExpectError('Expected of type \'' + str(expected_class) + '\' but was \'' + str(actual.class()) + '\'.')
+}
+
+self.PASS = color('32;1').extend('PASS').extend(color(0))
+self.FAIL = color('31;1').extend('FAIL').extend(color(0))
+
+class Tester {
+  method test(module) {
+    stats = []
+    for (_, cls) in module.classes() {
+      if ~_is_test_class(cls) {
+        continue
+      }
+      setups = _extract_methods(cls, SetUp)
+      teardowns =  _extract_methods(cls, TearDown)
+      for (_, meth) in cls.all_methods() {
+        if ~_method_is_test(meth) {
+          continue
+        }
+        pass = True
+        err = None
+        try {
+          instance = cls()
+          setups.each(setup -> instance.$get(setup.name())())
+          instance.$get(meth.name())()      
+          teardowns.each(teardown -> instance.$get(teardown.name())())
+        } catch e {
+          pass = False
+          err = e
+        }
+        stats.append(cls, meth, pass, err)
+      }
+    }
+    failures = stats.where((_, _, pass, _) -> ~pass)
+    num_passes = stats.count((_, _, pass, _) -> pass)
+    col = if num_passes == stats.len() then '32;1' else '31;1'
+    for (_, (cls, meth, _, err)) in failures {
+      io.println('Test ' + cls.name() + '.' + meth.name() + '=' + FAIL + '\n')
+      io.println(err)
+    }
+    io.println(
+      'Tests [' + color(col) + str(num_passes) + '/' + str(stats.len()) + color(0) + '] passed.')
+    if stats.len() == 0 {
+      raise error.Error('No tests found.')
+    }
+    if num_passes != stats.len() {
+      raise error.Error(str(stats.len() - num_passes) + ' test(s) failed.')
+    }
+  }
+
+  method _is_test_class(cls) {
+    for (_, annot) in cls.all_annotations() {
+      if annot is TestClass {
+        return True
+      }
+    }
+    return False
+  }
+
+  method _method_is_test(func) {
+    for (_, annot) in func.annotations {
+      if annot is Test {
+        return True
+      }
+    }
+    return False
+  }
+
+  method _extract_methods(test_cls, cls) {
+    methods = []
+    for (_, meth) in test_cls.all_methods() {
+      for (_, annot) in meth.annotations {
+        if annot is cls {
+          methods.append(meth)
+        }
+      }
+    }
+    return methods
+  }
+}

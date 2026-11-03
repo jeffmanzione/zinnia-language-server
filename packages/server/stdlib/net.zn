@@ -1,0 +1,514 @@
+import async
+import error
+import inject
+import io
+import net
+import socket
+import struct
+
+class Header {
+  new(field protocol,
+      field version,
+      field status_code,
+      field status,
+      field content_type,
+      field charset) {}
+  method to_s() {
+    cat(protocol, '/', version, ' ',
+           status_code, ' ', status,
+           '\r\nContent-Type: ', content_type,
+           '; charset=', charset, '\r\n\r\n')
+  }
+}
+
+function parse_header(header_text) {
+  i = header_text.find('/')
+  protocol = header_text.substr(0, i)
+  i2 = i + 1 + header_text.find(' ', i+1)
+  version = header_text.substr(i+1, i2)
+  i3 = i2 + 1 + header_text.find(' ', i2+1)
+  status_code = header_text.substr(i2+1, i3)
+  i4 = i3 + 1 + header_text.find('\r\n', i3+1)
+  status = header_text.substr(i3+1, i4)
+  i5 = i4 + 1 + header_text.find(' ', i4+1)
+  i6 = i5 + 1 + header_text.find(';', i5+1)
+  content_type = header_text.substr(i5+1, i6)
+  i7 = i6 + 1 + header_text.find('=', i6+1)
+  i8 = i7 + 1 + header_text.find('\r\n', i7+1)
+  charset = header_text.substr(i7+1, i8)
+  return Header(protocol, version, status_code, status, content_type, charset)
+}
+
+class HttpRequest {
+    field _headers
+    new(field type,
+        field path,
+        field params,
+        field protocol,
+        field version,
+        headers) {
+          _headers = headers
+        }
+    method get_header_value(key) {
+      return _headers[key]
+    }
+    method get_host() {
+      return _headers[i'Host']
+    }
+    method get_connection() {
+      return _headers[i'Connection']
+    }
+    method get_user_agent() {
+      return _headers[i'User-Agent']
+    }
+    method get_accept() {
+      return _headers[i'Accept'].split(',')
+    }
+    method get_cookie() {
+      return _headers[i'Cookie']
+    }
+    method to_s() {
+      ret = cat(type, ' ', path)
+      if params and (params.keys.len() > 0) {
+        ret.extend('?')
+        param_arr = []
+        for (k, v) in params {
+          param_arr.append(cat(k, '=', v))
+        }
+        ret.extend('&'.join(param_arr))
+      }
+      ret.extend(' ').extend(protocol).extend('/')
+          .extend(version).extend('\r\n')
+      if _headers {
+        for (k, v) in _headers {
+          ret.extend('  ').extend(k).extend(': ').extend(str(v))
+              .extend('\r\n')
+        }
+      }
+      return ret
+    }
+}
+
+
+class HttpResponse {
+  field _protocol, _version, _status_code, _status
+  field _headers, _content, _set_cookies
+  new() {
+    _protocol = i'HTTP'
+    _version = 1.1
+    _status_code = 200
+    _status = i'OK'
+    _headers = {}
+    _headers[i'Content-Type'] = i'text/html'
+    _headers[i'Accept-Ranges'] = i'bytes'
+    _headers[i'Content-Length'] = 0
+    _content = ''
+    _set_cookies = {}
+  }
+  method set_status(status) {
+    _status = status
+    return self
+  }
+  method set_status_code(status_code) {
+    _status_code = status_code
+    return self
+  }
+  method set_server(server) {
+    _headers[i'Server'] = server
+    return self
+  }
+  method set_date(date_text) {
+    _headers[i'Date'] = date_text
+    return self
+  }
+  method set_last_modified(date_text) {
+    _headers[i'Last-Modified'] = date_text
+    return self
+  }
+  method set_content_type(type) {
+    _headers[i'Content-Type'] = type
+    return self
+  }
+  method set_accept_ranges(ranges) {
+    _headers[i'Accept-Ranges'] = ranges
+    return self
+  }
+  method set_cookie(name, value) {
+    _set_cookies[str(name)] = str(value)
+  }
+  method add_content(text) {
+    _content.extend(text)
+    _headers[i'Content-Length'] = _headers[i'Content-Length'] + text.len()
+    return self
+  }
+  method to_s() {
+    res = cat(_protocol, '/', _version, ' ', _status_code, ' ', _status, '\r\n')
+    for (k, v) in _headers {
+      res.extend(cat(k, ': ', v, '\r\n'))
+    }
+    for (name, value) in _set_cookies {
+      res.extend((cat('Set-Cookie: ', _set_cookie_string(name, value), '\r\n')))
+    }
+    res.extend('\r\n')
+    res.extend(_content)
+    return res
+  }
+  method _set_cookie_string(name, value) {
+    return cat(name, '="', value, '"')
+  }
+}
+
+function redirect(request, response, target) {
+  response.set_status_code(301)
+  location = target
+  if request.params and (request.params.keys.len() > 0) {
+    location.extend('?')
+    param_arr = []
+    for (k, v) in request.params {
+      param_arr.append(cat(k, '=', v))
+    }
+    location.extend('&'.join(param_arr))
+  }
+  response._headers[i'Location'] = location
+  return response
+}
+
+function parse_params(path) {
+  q_index = path.find('?')
+  if ~q_index {
+    return (path, {})
+  }
+  (
+    path.substr(0, q_index),
+    path.substr(q_index + 1)
+      .split('&')
+      .collect(
+        (a, part) {
+          eq_index = part.find('=')
+          if ~eq_index {
+            a[part] = '1'
+          } else {
+            a[part.substr(0, eq_index)] = part.substr(eq_index + 1)
+          }
+          return a
+        },
+        {}))
+}
+
+function parse_request(req) {
+  try {
+    parts = req.split('\r\n')
+    if parts.len() == 0 {
+      raise error.Error(cat('Invalid request: ', req))
+    }
+    request = parts[0].trim()
+    req_head = request.split(' ')
+    type = req_head[0]
+    path = req_head[1]
+    (path, params) = parse_params(path)
+    protocol = req_head[2].split('/')
+    
+    map = {}
+    for i=1, i<parts.len(), i=i+1 {
+      ; Split at the first ':' since values may contain ':' (e.g. Host: a:80).
+      line = parts[i]
+      colon = line.find(':')
+      if colon == None {
+        continue
+      }
+      map[line.substr(0, colon).trim()] = line.substr(colon + 1).trim()
+    }
+    return HttpRequest(type, path, params, protocol[0], protocol[1], map)
+  } catch e {
+    io.fprintln(io.ERROR, e)
+    return None
+  }
+}
+
+@inject.Inject(keys: [HttpRequest, inject.Provider(HttpResponse)])
+class Cookies {
+  field cookies_map
+
+  new(field req, field resp_provider) {
+    cookies_map = _parse_cookie_map(req.get_cookie())
+  }
+  method [](name) {
+    return cookies_map[name]
+  }
+  method []=(name, value) {
+    cookies_map[name] = value
+    resp_provider().set_cookie(name, value)
+  }
+  method to_s() {
+    return cookies_map.to_s()
+  }
+  method _parse_cookie_map(cookie_string) {
+    if ~cookie_string or cookie_string == '' {
+      return {}
+    }
+
+    res = {}
+    kvs = cookie_string.split('; ')
+    for i=0, i<kvs.len(), i=i+1 {
+      kv = kvs[i].split('=')
+      res[kv[0]] = kv[1]
+    }
+    return res
+  }
+}
+
+class HttpSocketHandle {
+  new(field raw_handle) {}
+
+  method receive() async {
+    raw_request = await raw_handle.receive()
+    ; When the connection is gracefully closed, the response is None.
+    if ~raw_request {
+      return None
+    }
+    return parse_request(raw_request)
+  }
+  method send(http_response) async {
+    if ~(http_response is HttpResponse) {
+      raise error.Error(i'HttpSocketHandle.send() expects an HttpResponse argument.')
+    }
+    await raw_handle.send(http_response.to_s())
+  }
+  method close() {
+    raw_handle.close()
+  }
+}
+
+class HttpSocket {
+  new(field raw_socket) {}
+
+  method accept() async {
+    HttpSocketHandle(await raw_socket.accept())
+  }
+  method close() {
+    raw_socket.close()
+  }
+}
+
+; Marker for the raw request string.
+class RawRequest {}
+class RawResponse {}
+
+class BaseHttpProviderSet: inject.ProviderSet {
+  field req, resp, http_resp
+
+  new() {
+    super(inject.ProviderSet)()
+  }
+
+  @inject.Provides(key: HttpResponse)
+  method base_response() {
+    if ~http_resp {
+      http_resp = HttpResponse()
+    }
+    return http_resp
+  }
+
+  @inject.Provides(key: HttpRequest, params: [RawRequest])
+  method marshall(raw_req) {
+    if ~raw_req {
+      return None
+    }
+    if ~req {
+      req = parse_request(raw_req)  
+      io.println('HTTP/' + req.version + ' ' + req.path)
+      resp = None
+      http_resp = None
+    }
+    return req
+  }
+
+  @inject.Provides(key: RawResponse, params: [HttpResponse])
+  method unmarshall(http_resp) {
+    if ~http_resp {
+      return None
+    }
+    if ~resp {
+      resp = http_resp.to_s()
+      req = None
+    }
+    return resp
+  }
+}
+
+class Rpc { method annotate(_) {} }
+
+class Get { method annotate(_) {} }
+class Head { method annotate(_) {} }
+class Post { method annotate(_) {} }
+class Put { method annotate(_) {} }
+class Delete { method annotate(_) {} }
+class Connect { method annotate(_) {} }
+class Options { method annotate(_) {} }
+class Trace { method annotate(_) {} }
+class Patch { method annotate(_) {} }
+
+function always_true() {
+  True
+}
+
+class RequestController {
+  new(field matcher_fn=always_true, field request_key = RawRequest, field response_key = RawResponse) {}
+  method process(controller, req) {
+    return find_annotated_method(controller, Rpc)()
+  }
+}
+
+class RequestMatcher {
+  method matches(raw_request) { False }
+}
+
+class HttpRequestController : RequestController {
+  new(http_matcher_fn=always_true) {
+    super(RequestController)(http_matcher_fn, HttpRequest, HttpResponse)
+  }
+
+  method process(controller, req) {
+    find_annotated_method(controller, _get_label(req))(req)
+  }
+
+  method _get_label(req) { _REQUEST_METHOD_TO_ANNOTATION[req.type] }
+}
+
+class Application {
+  field controller_classes, provider_sets
+
+  new(field host, field port) {
+    controller_classes = []
+    provider_sets = []
+  }
+
+  method add_controller(ctrlr_cls) {
+    controller_classes.append(ctrlr_cls)
+    return self
+  }
+
+  method add_provider_set(ps) {
+    provider_sets.append(ps)
+    return self
+  }
+
+  method start() {
+    return async.spawn_actor(
+        ApplicationRunner,
+        (host, port, controller_classes, provider_sets))
+  }
+}
+
+self._REQUEST_METHOD_TO_ANNOTATION = {
+  i'GET': Get,
+  i'HEAD': Head,
+  i'POST': Post,
+  i'PUT': Put,
+  i'DELETE': Delete,
+  i'CONNECT': Connect,
+  i'OPTIONS': Options,
+  i'TRACE': Trace,
+  i'PATCH': Patch
+}
+
+function find_annotated_method(instance, annot) {
+  cls = instance.class()
+  methods = cls.all_methods().where(m -> m.annotations.has(a -> a is annot))
+  if methods.len() == 0 {
+    raise error.Error(str(cls) + ' has no ' + str(annot) + ' annotated methods.')
+  } else if methods.len() > 1 {
+    raise error.Error(str(cls) + ' has multiple ' + str(annot) + ' annotated methods.')
+  }
+  return instance.$get(methods[0].name())
+}
+
+@async.Actor
+class ApplicationRunner {
+  field injector
+  new(field host, field port, field controller_classes, field provider_sets=[]) {
+    injector = inject.Injector()
+    provider_sets.each(ps -> injector.install(ps()))
+    for (_, ctrlr_cls) in controller_classes {
+      injector.install(ctrlr_cls)
+    }
+  }
+
+  method _select_controller(request) {
+    for (_, ctrlr_cls) in controller_classes {
+      req_ctrlr = _get_request_controller(ctrlr_cls)
+      matcher_fn = req_ctrlr.matcher_fn
+      if (matcher_fn is Class) and matcher_fn.is_subclass_of(RequestMatcher) {
+        matcher_fn = injector.get(matcher_fn).matches
+      }
+      if matcher_fn(request) {
+        return (req_ctrlr, ctrlr_cls)
+      }
+    }
+    return (None, None)
+  }
+
+  method process(request, timer) {
+    injector.install(RawRequest, () -> request)
+    (req_ctrlr, ctrlr_cls) = _select_controller(request)
+    if ~req_ctrlr or ~ctrlr_cls {
+      raise error.Error('No controller found for request: ' + str(request))
+    }
+    ctrlr = injector.get(ctrlr_cls)
+    request2 = injector.get(req_ctrlr.request_key)
+    process_resp = req_ctrlr.process(ctrlr, request2)
+    resp = injector.get(RawResponse)
+    ; RawResponse is not bound, so fall back.
+    if ~(resp is String) {
+      return process_resp
+    }
+    return resp
+  }
+
+  method _get_request_controller(ctrlr_cls) {
+    req_ctrlrs = ctrlr_cls.all_annotations().where(a -> a is RequestController)
+    if req_ctrlrs.len() == 0 {
+      raise error.Error(str(ctrlr_cls) + ' has no RequestController annotation.')
+    } else if req_ctrlrs.len() > 1 {
+      raise error.Error(str(ctrlr_cls) + ' has multiple RequestController annotations.')
+    }
+    return req_ctrlrs[0]
+  }
+
+  method run() {
+    sock = socket.create_server_socket(host, port)
+    io.println('Started app at ' + str(host) + ':' +  str(port))
+    while True {
+      handle = await sock.accept()
+      try {
+        req = await handle.receive()
+        resp = process(req, timer)
+        await handle.send(resp)
+      } catch e {
+        io.fprintln(io.ERROR, e)
+      }
+      handle.close()
+    }
+  }
+}
+
+class Server {
+  field apps
+
+  new() {
+    apps = []
+  }
+
+  method add_application(app) {
+    apps.append(app)
+    return self
+  }
+
+  method run() {
+    await async.all(
+     apps.map(app -> app.start().run())
+    )
+    ; runners = apps.map(app -> app.start())
+    ; runners.each(r -> r.run())
+  }
+}

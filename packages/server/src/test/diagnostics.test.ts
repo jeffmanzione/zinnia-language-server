@@ -9,10 +9,10 @@ import {SemanticAnalyzer} from '../semantics/analyzer';
 // A stand-in for the standard library: just enough of builtin and one other
 // module to resolve names and imports.
 const LIBS = [
-  {uri: 'zinnia/lib/builtin.zn', text: 'function cat(args) args\nfunction str(x) x\n'},
-  {uri: 'zinnia/lib/io.zn', text: 'function println(a) a\n'},
-  {uri: 'zinnia/lib/async.zn', text: 'class Actor {}\n'},
-  {uri: 'zinnia/lib/build.zn', text: 'class WithBuilder {}\n'},
+  {name: 'builtin', path: '/stdlib/builtin.zn', text: 'function cat(args) args\nfunction str(x) x\n'},
+  {name: 'io', path: '/stdlib/io.zn', text: 'function println(a) a\n'},
+  {name: 'async', path: '/stdlib/async.zn', text: 'class Actor {}\n'},
+  {name: 'build', path: '/stdlib/build.zn', text: 'class WithBuilder {}\n'},
 ];
 
 let analyzer: SemanticAnalyzer;

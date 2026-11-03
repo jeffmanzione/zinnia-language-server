@@ -4,7 +4,7 @@ import {WorkspaceFolder} from 'vscode-languageserver/node';
 import {URI} from 'vscode-uri';
 
 import {SemanticTokensParams2} from '../interfaces';
-import {fetchZinniaLibs, FileContents} from '../lib';
+import {LibFile, loadZinniaLibs} from '../lib';
 
 import {ParseProblem, parseModule} from './parser';
 import {generateSemanticTokens, SemanticContext, SemanticIdentifier, SemanticImport, SemanticModule, SemanticToken} from './semantic';
@@ -53,23 +53,27 @@ export class SemanticAnalyzer {
 
   // Loads the standard library with [loadLibs], which fetches it from GitHub
   // by default.
+  // Loads the standard library with [loadLibs], which reads the bundled copy by
+  // default.
   async init(
       workspaceFolders: WorkspaceFolder[],
-      loadLibs: () => Promise<FileContents[]> = fetchZinniaLibs): Promise<void> {
+      loadLibs: () => Promise<LibFile[]>| LibFile[] = () => loadZinniaLibs()):
+      Promise<void> {
     try {
       this.workspacePaths_ = workspaceFolders.map(
           wf => URI.parse(wf.uri).fsPath.replace(/\\/g, '/'));
       const libs = await loadLibs();
+      // Analyze builtin first, so the other modules' uses of builtins resolve.
+      libs.sort((a, b) => Number(b.name === 'builtin') - Number(a.name === 'builtin'));
       for (const lib of libs) {
-        const info = this.parseDocumentText_(lib.uri, lib.text);
-        this.libNamesToFilePaths_.set(
-            info.path.slice(
-                'zinnia/lib/'.length, info.path.length - '.zn'.length),
-            info.path);
+        this.libNamesToFilePaths_.set(lib.name, lib.path);
+      }
+      for (const lib of libs) {
+        this.parseDocumentText_(lib.path, lib.text);
       }
     } catch (e: any) {
-      // Carry on without the standard library (e.g., when offline) rather than
-      // failing every request.
+      // Carry on without the standard library rather than failing every
+      // request.
       console.error('Could not load the Zinnia standard library:', e);
     }
     this.initResolve_!();
@@ -233,6 +237,11 @@ export class SemanticAnalyzer {
   // Whether [filePath] is a standard library module, either as fetched or in a
   // checkout of zinnia.
   isStandardLibraryFile(filePath: string): boolean {
+    for (const libPath of this.libNamesToFilePaths_.values()) {
+      if (libPath === filePath) {
+        return true;
+      }
+    }
     const match = /(?:^|\/)zinnia\/lib\/([a-z_]+)\.zn$/.exec(filePath);
     return match !== null &&
         (this.libNamesToFilePaths_.size === 0 ||
