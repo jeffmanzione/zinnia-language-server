@@ -1,15 +1,13 @@
 import * as assert from 'node:assert/strict';
 import {describe, it} from 'node:test';
-import {expectEOF, expectSingleResult} from 'typescript-parsec';
 import {SymbolKind} from 'vscode-languageserver/node';
 
-import {MODULE} from '../semantics/parser';
-import {zinniaTokenizer} from '../semantics/tokenizer';
+import {parseModule} from '../semantics/parser';
 import {documentSymbols} from '../symbols';
 
 describe('documentSymbols', () => {
   it('lists classes with their members and top-level functions', () => {
-    const module = expectSingleResult(expectEOF(MODULE.parse(zinniaTokenizer.parse([
+    const {module, problems} = parseModule([
       'class Greeter {',
       '  field greeting',
       '  static DEFAULT = 1',
@@ -18,7 +16,8 @@ describe('documentSymbols', () => {
       '}',
       'function make() Greeter(\'x\')',
       '',
-    ].join('\n')))));
+    ].join('\n'));
+    assert.deepEqual(problems, []);
     const symbols = documentSymbols(module);
     assert.deepEqual(
         symbols.map(s => [s.name, s.kind]),

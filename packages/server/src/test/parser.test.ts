@@ -1,15 +1,15 @@
 import * as assert from 'node:assert/strict';
 import {describe, it} from 'node:test';
-import {expectEOF, expectSingleResult} from 'typescript-parsec';
-
 import {SemanticAnalyzer} from '../semantics/analyzer';
-import {MODULE} from '../semantics/parser';
+import {parseModule} from '../semantics/parser';
 import {generateSemanticTokens} from '../semantics/semantic';
 import {Module} from '../semantics/statements';
-import {zinniaTokenizer} from '../semantics/tokenizer';
 
+// Parses [text], which must have no syntax errors.
 function parse(text: string): Module {
-  return expectSingleResult(expectEOF(MODULE.parse(zinniaTokenizer.parse(text))));
+  const result = parseModule(text);
+  assert.deepEqual(result.problems, []);
+  return result.module;
 }
 
 // An analyzer that knows no other modules, so tests don't load the standard
@@ -83,6 +83,84 @@ describe('parser', () => {
     const module = parse('def = 1\n');
     assert.equal((module.statements[0] as any).lhs.token.text, 'def');
   });
+
+  it('ends a line comment before the new line', () => {
+    // If the comment swallowed the new line, `f` and `(2)` would become a call.
+    const module = parse('x = f ; comment\n(2)\n; Last line, no new line.');
+    assert.deepEqual(
+        module.statements.map(s => s.kind), ['AssignBaseExpr', 'ParensExpr']);
+  });
+});
+
+describe('error recovery', () => {
+  // Returns a summary of each statement and the rows of the problems.
+  function recover(text: string): [string[], number[]] {
+    const result = parseModule(text);
+    const statements = result.module.statements.map((s: any) => {
+      if (s.kind === 'AssignBaseExpr') {
+        return s.lhs.token.text + '=';
+      }
+      if (s.kind === 'FunctionStat' || s.kind === 'ClassStat') {
+        return s.name.token.text;
+      }
+      return s.kind;
+    });
+    return [statements, result.problems.map(p => p.row ?? -1)];
+  }
+
+  it('skips a bad statement and keeps the rest', () => {
+    assert.deepEqual(
+        recover('a = 1\nb = 2 ) 3\nc = 3\n'), [['a=', 'b=', 'c='], [1]]);
+  });
+
+  it('keeps a function whose body has an error', () => {
+    const [statements, rows] =
+        recover('function f() {\n  a = 1\n  b = = 2\n  c = 3\n}\nfunction g() 4\n');
+    assert.deepEqual(statements, ['f', 'g']);
+    assert.deepEqual(rows, [2]);
+  });
+
+  it('keeps a class whose method has an error', () => {
+    const result = parseModule(
+        'class A {\n  method m() {\n    x = )\n  }\n  method n() 1\n}\nb = 2\n');
+    const cls = result.module.statements[0] as any;
+    assert.equal(cls.kind, 'ClassStat');
+    assert.deepEqual(cls.stats.map((m: any) => m.name.token.text), ['m', 'n']);
+    assert.equal(result.module.statements.length, 2);
+    assert.deepEqual(
+        result.problems,
+        [{message: 'Unexpected \')\'; expected an expression.', row: 2, col: 8}]);
+  });
+
+  it('closes an unclosed block at the next top-level definition', () => {
+    const result =
+        parseModule('function f() {\n  a = 1\nfunction g() 2\n');
+    assert.deepEqual(
+        result.module.statements.map((s: any) => s.name.token.text), ['f', 'g']);
+    assert.deepEqual(result.problems, [{
+      message: '\'{\' is never closed; expected \'}\'.',
+      row: 0,
+      col: 13
+    }]);
+  });
+
+  it('reports an unclosed parenthesis at the end of the file', () => {
+    assert.deepEqual(
+        parseModule('x = 1\ny = (2\n').problems,
+        [{message: 'Unexpected end of file; expected \',\' or \')\'.'}]);
+    assert.deepEqual(
+        parseModule('x = 1\ny = (2,\n').problems,
+        [{message: 'Unexpected end of file; expected an expression.'}]);
+  });
+
+  it('reports unknown characters and unterminated strings', () => {
+    assert.deepEqual(
+        parseModule('a = 1\nb = 2 $$ 3\n').problems,
+        [{message: 'Unexpected character \'$\'.', row: 1, col: 6}]);
+    assert.deepEqual(
+        parseModule('a = \'abc\nb = 2\n').problems,
+        [{message: 'Unterminated string.', row: 0, col: 4}]);
+  });
 });
 
 describe('semantic tokens', () => {
@@ -109,16 +187,17 @@ describe('semantic tokens', () => {
 });
 
 describe('SemanticAnalyzer', () => {
-  it('reports parse problems and keeps the last good analysis', async () => {
+  it('reports syntax errors and analyzes the rest of the file', async () => {
     const analyzer = new SemanticAnalyzer();
     await analyzer.init([], async () => []);
-    const uri = 'file:///analyzer-test.zn';
-    const good =
-        await analyzer.parseDocument({textDocument: {uri: uri}, text: 'x = 1\n'});
-    assert.deepEqual(good.problems, []);
-    const bad = await analyzer.parseDocument(
-        {textDocument: {uri: uri}, text: 'x = (1,\n'});
-    assert.equal(bad.problems.length, 1);
-    assert.ok(bad.tokens.some(t => t.text === 'x'));
+    const info = await analyzer.parseDocument({
+      textDocument: {uri: 'file:///analyzer-test.zn'},
+      text: 'x = 1\ny = = 2\nz = x\n'
+    });
+    assert.equal(info.problems.length, 1);
+    assert.equal(info.problems[0].row, 1);
+    assert.ok(info.tokens.some(t => t.text === 'z'));
+    const uses = info.tokens.filter(t => t.text === 'x');
+    assert.equal(uses.length, 2);
   });
 });

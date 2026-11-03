@@ -1,50 +1,24 @@
 import {readdirSync, readFileSync} from 'fs';
 import * as path from 'path';
-import {expectEOF, expectSingleResult} from 'typescript-parsec';
 import {WorkspaceFolder} from 'vscode-languageserver/node';
 import {URI} from 'vscode-uri';
 
 import {SemanticTokensParams2} from '../interfaces';
 import {fetchZinniaLibs, FileContents} from '../lib';
 
-import {MODULE} from './parser';
+import {ParseProblem, parseModule} from './parser';
 import {generateSemanticTokens, SemanticContext, SemanticIdentifier, SemanticModule, SemanticToken} from './semantic';
-import {zinniaTokenizer} from './tokenizer';
 
-// A problem found while parsing a document. Rows and columns are 0-based. A
-// problem with no position is at the end of the document.
-export interface ParseProblem {
-  message: string;
-  row?: number;
-  col?: number;
-}
+export {ParseProblem};
 
 export interface SemanticDocInfo {
   path: string;
   context?: SemanticContext;
   module?: SemanticModule;
   tokens: SemanticToken[];
-  // Problems found in the latest version of the document. When it fails to
-  // parse, the other fields are from the last version that parsed, if any.
+  // Syntax errors in the document. The other fields describe the parts of the
+  // document that could still be parsed.
   problems: ParseProblem[];
-}
-
-function toParseProblem_(e: any): ParseProblem {
-  // typescript-parsec throws TokenErrors, which carry the position separately
-  // from the message.
-  if (e && typeof e.errorMessage === 'string') {
-    const message = e.errorMessage.replace(
-        /<END-OF-FILE>/g, 'the end of the file');
-    if (e.pos === undefined) {
-      return {message: message};
-    }
-    return {
-      message: message,
-      row: e.pos.rowBegin - 1,
-      col: e.pos.columnBegin - 1,
-    };
-  }
-  return {message: String(e)};
 }
 
 function* findLocalZnFiles_(dirs: string[]): Generator<string> {
@@ -127,35 +101,34 @@ export class SemanticAnalyzer {
   }
 
   private parseDocumentText_(path: string, text: string): SemanticDocInfo {
+    const parsed = parseModule(text);
     try {
-      const token = zinniaTokenizer.parse(text);
-      const parserOutput = MODULE.parse(token);
-      const output = expectSingleResult(expectEOF(parserOutput));
       // This document's previous analysis added its occurrences to identifiers
       // shared with other documents (e.g., builtins); remove them so they
       // don't accumulate with each reanalysis.
       this.forgetOccurrencesIn_(path);
       const [context, module, tokens] =
-          generateSemanticTokens(path, this, output);
+          generateSemanticTokens(path, this, parsed.module);
       const info: SemanticDocInfo = {
         path: path,
         context: context,
         module: module,
         tokens: tokens,
-        problems: [],
+        problems: parsed.problems,
       };
       this.docs_.set(path, info);
       return info;
     } catch (e) {
-      // Keep the last good analysis so highlighting and hovers keep working
-      // while the document is being edited.
+      // The semantic pass failed, which is a bug: report it, and keep the last
+      // analysis so highlighting and hovers keep working.
+      console.error(`Could not analyze ${path}:`, e);
       const previous = this.docs_.get(path);
       const info: SemanticDocInfo = {
         path: path,
         context: previous?.context,
         module: previous?.module,
         tokens: previous?.tokens ?? [],
-        problems: [toParseProblem_(e)],
+        problems: parsed.problems,
       };
       this.docs_.set(path, info);
       return info;

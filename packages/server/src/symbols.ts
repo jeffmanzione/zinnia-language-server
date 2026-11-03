@@ -1,10 +1,7 @@
-import * as parsec from 'typescript-parsec';
 import {DocumentSymbol, Range, SymbolKind} from 'vscode-languageserver/node';
 
 import {ClassStat, FunctionStat, Module} from './semantics/statements';
-import {TokenKind} from './semantics/tokenizer';
-
-type Token = parsec.Token<TokenKind>;
+import {Token, TokenKind} from './semantics/tokenizer';
 
 // Converts a token's 1-based position to an LSP range.
 export function tokenRange(token: Token): Range {
