@@ -31,6 +31,13 @@ export class SemanticIdentifier {
   tokens: TokenFile[] = [];
   modifiers: string[];
   tokensGenerated: boolean = false;
+  // Set on a name that was used before it was found, once it is resolved to
+  // the identifier it names.
+  forward?: SemanticIdentifier;
+  // Whether this is a variable declared with `const`.
+  isConst = false;
+  // The parameters of a function, or of a class's constructor.
+  signature?: Signature;
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -53,6 +60,60 @@ export class SemanticIdentifier {
     this.tokensGenerated = true;
   }
 }
+
+export interface Signature {
+  params: ParamExpr[];
+  // Whether the parameters are named, e.g. `function f({a, b})`.
+  isNamed: boolean;
+}
+
+// Follows an identifier's forward to the identifier it was resolved to.
+function resolved(id: SemanticIdentifier): SemanticIdentifier {
+  while (id.forward !== undefined) {
+    id = id.forward;
+  }
+  return id;
+}
+
+// A problem found by the semantic pass. Rows and columns are 0-based.
+export interface SemanticProblem {
+  message: string;
+  severity: 'error'|'warning';
+  row: number;
+  col: number;
+  length: number;
+}
+
+function problemAt(
+    token: Token, message: string,
+    severity: 'error'|'warning' = 'warning'): SemanticProblem {
+  return {
+    message: message,
+    severity: severity,
+    row: token.pos.rowBegin - 1,
+    col: token.pos.columnBegin - 1,
+    length: token.text.length,
+  };
+}
+
+// Names that are always defined: module-level globals and names defined
+// natively in builtin rather than in builtin.zn.
+const GLOBAL_NAMES = new Set([
+  'self', 'args', '__main', 'Int', 'Float', 'Bool', 'Char', 'color', 'is_int',
+  'is_float', 'is_bool', '__stringify', '__tuple', '__collect_garbage', 'Range',
+  'Isolate', 'ActorRef', 'Frame', 'Scope', 'Object', 'Class', 'Function',
+  'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple', 'Error',
+  'Future',
+]);
+
+// Native methods every object has, which methods can call without `self.`.
+const OBJECT_MEMBERS = new Set([
+  'class', 'super', 'hash', 'copy', '$get', '$set', '$adr', '$hex_addr',
+  'to_s',
+]);
+
+// Native methods of a module, which its top-level code can call unqualified.
+const MODULE_MEMBERS = new Set(['name', 'functions', 'classes']);
 
 interface SemanticConstant {
   ast: ConstantExpr;
@@ -291,12 +352,150 @@ export interface SemanticModule {
   statements: SemanticStatement[];
 }
 
+// What kind of scope a block is. Named functions and methods can't see the
+// plain variables of the module's top-level code, only its members.
+type BlockKind = 'module'|'class'|'function'|'block';
+
+// A use of a name that wasn't defined when it was used.
+interface UnresolvedName {
+  block: Block;
+  id: SemanticIdentifier;
+  uses: Token[];
+}
+
+// A call of a named function or class with positional arguments.
+interface Call {
+  callee: SemanticIdentifier;
+  token: Token;
+  argCount: number;
+}
+
+// The state of the semantic pass over one file.
+class FileState {
+  readonly problems: SemanticProblem[] = [];
+  readonly unresolved: UnresolvedName[] = [];
+  readonly calls: Call[] = [];
+  // Whether the file may create classes at runtime (with an annotation or the
+  // classes module), so an undefined class name might exist.
+  createsClasses = false;
+}
+
+// Standard library modules whose annotations create no classes other than the
+// ones processModule declares.
+const KNOWN_ANNOTATION_MODULES = new Set(['async', 'build', 'inject', 'net', 'test']);
+
+interface ScopedLookup {
+  id: SemanticIdentifier;
+  block: Block;
+  // Whether the lookup left a named function or method to find the name.
+  crossedFunction: boolean;
+}
+
+// Whether [found] is a plain variable of the module's top-level code seen from
+// inside a named function or method, which can't see it.
+function isHiddenTopLevelVariable(found: ScopedLookup): boolean {
+  return found.crossedFunction && found.block.kind === 'module' &&
+      found.id.type === 'variable' && found.id.modifiers.includes('local');
+}
+
 class Block {
   private readonly members: Map<string, SemanticIdentifier> = new Map();
+  // Names used in this block before they were defined.
+  private readonly unresolved: Map<string, UnresolvedName> = new Map();
+  readonly file: FileState;
+  // Whether names here might be inherited members that can't be resolved,
+  // e.g. in a method of a class whose superclass isn't known.
+  readonly inheritsUnknownMembers: boolean;
+  // Whether this block is inside a method.
+  readonly inMethod: boolean;
 
   constructor(
       private readonly analyzer: SemanticAnalyzer,
-      private readonly parent?: Block) {}
+      private readonly parent?: Block, readonly kind: BlockKind = 'module',
+      options: {inheritsUnknownMembers?: boolean, inMethod?: boolean} = {}) {
+    this.file = parent?.file ?? new FileState();
+    this.inheritsUnknownMembers =
+        options.inheritsUnknownMembers ?? parent?.inheritsUnknownMembers ?? false;
+    this.inMethod = options.inMethod ?? parent?.inMethod ?? false;
+  }
+
+  // Finds [name] in this block or an enclosing one, without looking in
+  // builtin.
+  findScoped(name: string): ScopedLookup|undefined {
+    let crossedFunction = false;
+    for (let block: Block|undefined = this; block !== undefined;
+         block = block.parent) {
+      const id = block.members.get(name);
+      if (id !== undefined) {
+        return {id: id, block: block, crossedFunction: crossedFunction};
+      }
+      if (block.kind === 'function') {
+        crossedFunction = true;
+      }
+    }
+    return undefined;
+  }
+
+  // Returns the identifier a use of [name] refers to, recording it if it isn't
+  // defined yet.
+  lookupUse(name: Token): SemanticIdentifier {
+    const found = this.findScoped(name.text);
+    if (found !== undefined) {
+      if (isHiddenTopLevelVariable(found)) {
+        this.file.problems.push(problemAt(
+            name,
+            `'${name.text}' is a variable of the module's top-level code, ` +
+                `which functions and methods can't see; make it a module ` +
+                `member with 'self.${name.text} = ...'.`));
+      }
+      return found.id;
+    }
+    const builtin = this.analyzer.searchBuiltinForId(name.text);
+    if (builtin !== undefined) {
+      return builtin;
+    }
+    let unresolved = this.unresolved.get(name.text);
+    if (unresolved === undefined) {
+      unresolved = {
+        block: this,
+        id: new SemanticIdentifier(
+            {kind: 'IdentifierExpr', token: name}, 'variable', [], name.text),
+        uses: [],
+      };
+      this.unresolved.set(name.text, unresolved);
+      this.file.unresolved.push(unresolved);
+    }
+    unresolved.uses.push(name);
+    return unresolved.id;
+  }
+
+  // Whether a name that isn't defined anywhere is still allowed here.
+  isAllowedUndefined(name: string): boolean {
+    // Names starting with __ are by convention defined natively, in C.
+    if (GLOBAL_NAMES.has(name) || name.startsWith('__') ||
+        this.inheritsUnknownMembers) {
+      return true;
+    }
+    if (this.file.createsClasses && /^[A-Z]/.test(name)) {
+      return true;
+    }
+    if (this.inMethod && OBJECT_MEMBERS.has(name)) {
+      return true;
+    }
+    return !this.inMethod && MODULE_MEMBERS.has(name);
+  }
+
+  // Declares a member of the module (`self.name = ...` at the top level).
+  declareModuleMember(id: IdentifierExpr|NewExpr): SemanticIdentifier {
+    let member = this.members.get(id.token.text);
+    if (member === undefined) {
+      member = new SemanticIdentifier(
+          {kind: 'IdentifierExpr', token: id.token}, 'variable', [],
+          id.token.text);
+      this.members.set(member.id, member);
+    }
+    return member;
+  }
 
   createIdentifier(id: IdentifierExpr, type: IdType): SemanticIdentifier {
     const sid = new SemanticIdentifier(id, type);
@@ -304,17 +503,16 @@ class Block {
     return sid;
   }
 
+  // Returns the identifier a definition of [id] defines: an existing one in
+  // scope, or a new one in this block. A top-level variable that a function
+  // or method can't see is shadowed instead.
   lookupOrCreateIdentifier(
       id: IdentifierExpr|SpecialMethodIdentifierExpr|NewExpr|string,
       type: IdType, modifiers: string[] = []): SemanticIdentifier {
     const idText = typeof id === 'string' ? id : id.token.text;
-    const foundId = this.findIdentifier(idText);
-    if (foundId != null) {
-      // // Upgrade if found declaration
-      // if (type === 'function' || type === 'method' || type === 'class') {
-      //   foundId.type = type;
-      // }
-      return foundId;
+    const found = this.findScoped(idText);
+    if (found !== undefined && !isHiddenTopLevelVariable(found)) {
+      return found.id;
     }
 
     let ast: IdentifierExpr;
@@ -367,9 +565,13 @@ export class SemanticContext {
     return this.analyzer.lookupDocInfoFromModuleName(moduleName) ?? null;
   }
 
-  newBlock(): SemanticContext {
+  newBlock(
+      kind: BlockKind = 'block',
+      options: {inheritsUnknownMembers?: boolean, inMethod?: boolean} = {}):
+      SemanticContext {
     const copy = new SemanticContext(
-        this.analyzer, this.filePath, new Block(this.analyzer, this.block));
+        this.analyzer, this.filePath,
+        new Block(this.analyzer, this.block, kind, options));
     copy.setModule(this.module!);
     return copy;
   }
@@ -463,6 +665,7 @@ function generateTokenForIdentiferToken(
     id: SemanticIdentifier, tok: TokenFile, context: SemanticContext,
     generator: TokenGenerator, parentName?: string,
     extraModifiers: string[] = []): void {
+  id = resolved(id);
   const modifiers = id.modifiers.concat(extraModifiers);
   generator.createToken(
       tok.token, selectIdType(id, tok.token), modifiers, tok.filePath,
@@ -472,7 +675,11 @@ function generateTokenForIdentiferToken(
 function generateTokensForIdentifier(
     id: SemanticIdentifier, context: SemanticContext, generator: TokenGenerator,
     parentName?: string): void {
-  if (id == null || generator.generatedIdentifiers.has(id)) {
+  if (id == null) {
+    return;
+  }
+  id = resolved(id);
+  if (generator.generatedIdentifiers.has(id)) {
     return;
   }
   generator.generatedIdentifiers.add(id);
@@ -942,6 +1149,7 @@ function processUnary(
   return {ast: unary, rhs: processExpression(unary.expr, context)};
 }
 
+// Processes an identifier that defines a name.
 function processIdentifier(
     id: IdentifierExpr|NewExpr|SpecialMethodIdentifierExpr,
     context: SemanticContext, type: IdType = 'variable',
@@ -952,9 +1160,17 @@ function processIdentifier(
   return identifier;
 }
 
+// Processes an identifier that uses a name.
+function processUse(id: IdentifierExpr, context: SemanticContext):
+    SemanticIdentifier {
+  const identifier = context.block.lookupUse(id.token);
+  identifier.addToken(id.token, context.filePath);
+  return identifier;
+}
+
 function processAnnotation(
     annot: AnnotationExpr, context: SemanticContext): SemanticAnnotation {
-  const first = processIdentifier(annot.firstPart, context, 'decorator');
+  const first = processUse(annot.firstPart, context);
   const second = annot?.secondPart?.token;
   const params = [];
   if (annot.args != null) {
@@ -968,6 +1184,17 @@ function processAnnotation(
 function processPostfix(
     postfix: PostfixChainExpr, context: SemanticContext): SemanticPostfix {
   const base = processExpression(postfix.lhs, context) as SemanticPrimary;
+  const call = postfix.postfixes[0];
+  if (postfix.lhs.kind === 'IdentifierExpr' &&
+      (call.kind === 'EmptyParensExpr' ||
+       (call.kind === 'FunctionCallExpr' &&
+        !call.args.some(a => a.kind === 'NamedArgExpr')))) {
+    context.block.file.calls.push({
+      callee: base as SemanticIdentifier,
+      token: postfix.lhs.token,
+      argCount: call.kind === 'EmptyParensExpr' ? 0 : call.args.length,
+    });
+  }
   const nestedExprs: (SemanticExpression|Token)[] = [];
   for (const pfx of postfix.postfixes) {
     if (pfx.kind === 'ArrayIndexExpr') {
@@ -1087,7 +1314,7 @@ function processExpression(
   } else if (expr.kind === 'StringExpr') {
     return processString(expr, context);
   } else if (expr.kind === 'IdentifierExpr') {
-    return processIdentifier(expr, context);
+    return processUse(expr, context);
   } else if (expr.kind === 'UnaryChainExpr') {
     return processUnary(expr, context);
   } else if (expr.kind === 'AssignBaseExpr') {
@@ -1146,12 +1373,27 @@ function processString(
 function processAssignLhs(
     expr: AssignLhsExpr, context: SemanticContext): SemanticAssignLhs {
   if (expr.kind === 'IdentifierExpr') {
-    return {
-      ast: expr,
-      expr: processIdentifier(
-          expr, context, 'variable',
-          expr.constTok ? ['local', 'readonly'] : ['local'])
-    };
+    const id = processIdentifier(
+        expr, context, 'variable',
+        expr.constTok ? ['local', 'readonly'] : ['local']);
+    if (resolved(id).isConst) {
+      context.block.file.problems.push(problemAt(
+          expr.token, `Cannot reassign const '${expr.token.text}'.`, 'error'));
+    }
+    if (expr.constTok) {
+      id.isConst = true;
+    }
+    return {ast: expr, expr: id};
+  }
+
+  // `self.name = ...` in the module's top-level code defines a module member,
+  // which functions and methods can see.
+  if (expr.kind === 'PostfixChainExpr' && context.block.kind === 'module' &&
+      expr.lhs.kind === 'IdentifierExpr' && expr.lhs.token.text === 'self' &&
+      expr.postfixes.length === 1 &&
+      expr.postfixes[0].kind === 'MemberAccessExpr') {
+    const member = context.block.declareModuleMember(expr.postfixes[0].field);
+    member.addToken(expr.postfixes[0].field.token, context.filePath);
   }
 
   if (isPostfixExpr(expr)) {
@@ -1183,8 +1425,9 @@ function processFunction(
     }
   }
   const name = processIdentifier(stat.name, context, 'function');
+  name.signature = {params: stat.params, isNamed: stat.isNamed};
   const params: SemanticParam[] = [];
-  const newContext = context.newBlock();
+  const newContext = context.newBlock('function');
   for (const param of stat.params) {
     params.push({
       ast: param,
@@ -1330,7 +1573,9 @@ function processMethod(
     }
   }
   const params: SemanticParam[] = [];
-  const newContext = context.newBlock();
+  const newContext = context.newBlock(
+      'function',
+      {inMethod: true, inheritsUnknownMembers: classStat.super !== undefined});
   for (const param of stat.params) {
     if (param.field != null) {
       fields.push({
@@ -1345,7 +1590,7 @@ function processMethod(
       isField: param.field != null,
       defaultValue: param.defaultValue == null ?
           undefined :
-          processExpression(param.defaultValue, context)
+          processExpression(param.defaultValue, newContext)
     });
   }
   return {
@@ -1384,6 +1629,11 @@ function processClass(
       processIdentifier(classStat.name, context, 'method');
     }
   }
+  const constructor = stat.stats.find(
+      (m): m is MethodStat => m.kind === 'MethodStat' && m.name.kind === 'NewExpr');
+  if (constructor !== undefined) {
+    name.signature = {params: constructor.params, isNamed: constructor.isNamed};
+  }
   for (const classStat of stat.stats) {
     if (classStat.kind === 'MethodStat') {
       const meth = processMethod(
@@ -1404,6 +1654,32 @@ function processClass(
   };
 }
 
+// Declares the classes and functions that standard library annotations create
+// at runtime, e.g. FooProxy for an @async.Actor class Foo.
+function declareGeneratedClasses(stat: ClassStat, context: SemanticContext): void {
+  const name = stat.name.token.text;
+  for (const annot of stat.annots) {
+    const module = annot.secondPart === undefined ? undefined :
+                                                     annot.firstPart.token.text;
+    const annotation = annot.secondPart?.token.text ?? annot.firstPart.token.text;
+    if (module === undefined || !KNOWN_ANNOTATION_MODULES.has(module)) {
+      context.block.file.createsClasses = true;
+    }
+    const generated: [string, IdType][] = [];
+    if (module === 'async' && annotation === 'Actor') {
+      generated.push([`${name}Proxy`, 'class']);
+    } else if (module === 'build' && annotation === 'WithBuilder') {
+      const builderName = annot.args?.[0]?.kind === 'StringExpr' ?
+          annot.args[0].token.text.replace(/^i?'|'$/g, '') :
+          `${name}Builder`;
+      generated.push([builderName, 'class'], [`builder_of_${name}`, 'function']);
+    }
+    for (const [generatedName, type] of generated) {
+      context.block.lookupOrCreateIdentifier(generatedName, type);
+    }
+  }
+}
+
 function processModule(
     module: Module, context: SemanticContext): SemanticModule {
   const imports: SemanticImport[] = [];
@@ -1412,8 +1688,12 @@ function processModule(
   for (const stat of module.statements) {
     if (stat.kind === 'ImportStat' || stat.kind === 'ImportAsStat') {
       imports.push(processImport(stat, context));
+      if (stat.source.token.text === 'classes') {
+        context.block.file.createsClasses = true;
+      }
     } else if (stat.kind === 'ClassStat') {
       processIdentifier(stat.name, context, 'class', []);
+      declareGeneratedClasses(stat, context);
     } else if (stat.kind === 'FunctionStat') {
       processIdentifier(stat.name, context, 'function', []);
     }
@@ -1422,7 +1702,7 @@ function processModule(
     if (stat.kind === 'ClassStat') {
       classes.push(processClass(
           stat, processIdentifier(stat.name, context, 'class', []),
-          context.newBlock()));
+          context.newBlock('class')));
     }
   }
   for (const stat of module.statements) {
@@ -1441,12 +1721,79 @@ function processModule(
   return semanticModule;
 }
 
+// Resolves names used before they were defined, e.g. in a lambda that refers to
+// a variable assigned after it, and reports the ones that are never defined.
+function resolveUnresolvedNames(
+    file: FileState, analyzer: SemanticAnalyzer, filePath: string): void {
+  // Without builtin, which failed to load, undefined names can't be told
+  // apart from builtins. Standard library modules use names defined natively,
+  // in C, so they aren't checked either.
+  const checkUndefined = analyzer.searchBuiltinForId('cat') !== undefined &&
+      !analyzer.isStandardLibraryFile(filePath);
+  for (const unresolved of file.unresolved) {
+    const found = unresolved.block.findScoped(unresolved.id.id);
+    if (found !== undefined && found.id !== unresolved.id) {
+      unresolved.id.forward = found.id;
+      found.id.tokens.push(...unresolved.id.tokens);
+      if (isHiddenTopLevelVariable(found)) {
+        for (const use of unresolved.uses) {
+          file.problems.push(problemAt(
+              use,
+              `'${use.text}' is a variable of the module's top-level code, ` +
+                  `which functions and methods can't see; make it a module ` +
+                  `member with 'self.${use.text} = ...'.`));
+        }
+      }
+      continue;
+    }
+    if (!checkUndefined || unresolved.block.isAllowedUndefined(unresolved.id.id)) {
+      continue;
+    }
+    for (const use of unresolved.uses) {
+      file.problems.push(problemAt(use, `'${use.text}' is not defined.`));
+    }
+  }
+}
+
+// Reports calls of functions and constructors with the wrong number of
+// positional arguments. Extra arguments are ignored and missing ones are None,
+// so these are warnings. A function with one parameter receives several
+// arguments as a tuple, and a single argument may be a tuple that fills
+// several parameters, so those calls aren't checked.
+function checkCalls(file: FileState): void {
+  for (const call of file.calls) {
+    const callee = resolved(call.callee);
+    const signature = callee.signature;
+    if (signature === undefined || signature.isNamed ||
+        signature.params.length < 2 || call.argCount === 1) {
+      continue;
+    }
+    const max = signature.params.length;
+    const min = signature.params.filter(p => p.defaultValue === undefined).length;
+    const name = call.token.text;
+    if (call.argCount > max) {
+      file.problems.push(problemAt(
+          call.token,
+          `'${name}' takes ${max} arguments but ${call.argCount} were given; ` +
+              `the extra ones are ignored.`));
+    } else if (call.argCount < min) {
+      file.problems.push(problemAt(
+          call.token,
+          `'${name}' takes ${min === max ? '' : 'at least '}${min} arguments ` +
+              `but ${call.argCount} were given; the missing ones are None.`));
+    }
+  }
+}
+
 export function generateSemanticTokens(
-    filePath: string, analyzer: SemanticAnalyzer,
-    module: Module): [SemanticContext, SemanticModule, SemanticToken[]] {
+    filePath: string, analyzer: SemanticAnalyzer, module: Module):
+    [SemanticContext, SemanticModule, SemanticToken[], SemanticProblem[]] {
   const context = new SemanticContext(analyzer, filePath);
   const generator = new TokenGenerator(filePath);
   const semanticModule = processModule(module, context);
+  const file = context.block.file;
+  resolveUnresolvedNames(file, analyzer, filePath);
+  checkCalls(file);
   generatTokensForModule(semanticModule, context, generator);
-  return [context, semanticModule, generator.finalizeTokens()];
+  return [context, semanticModule, generator.finalizeTokens(), file.problems];
 }

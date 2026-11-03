@@ -151,8 +151,12 @@ documents.onDidChangeContent(async change => {
         end :
         {line: problem.row, character: problem.col ?? 0};
     return {
-      severity: DiagnosticSeverity.Error,
-      range: {start: start, end: {...start, character: start.character + 1}},
+      severity: problem.severity === 'warning' ? DiagnosticSeverity.Warning :
+                                                 DiagnosticSeverity.Error,
+      range: {
+        start: start,
+        end: {...start, character: start.character + (problem.length ?? 1)}
+      },
       message: problem.message,
       source: 'zinnia',
     };

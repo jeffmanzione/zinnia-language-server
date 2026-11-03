@@ -1,4 +1,4 @@
-import {readdirSync, readFileSync} from 'fs';
+import {existsSync, readdirSync, readFileSync} from 'fs';
 import * as path from 'path';
 import {WorkspaceFolder} from 'vscode-languageserver/node';
 import {URI} from 'vscode-uri';
@@ -107,14 +107,18 @@ export class SemanticAnalyzer {
       // shared with other documents (e.g., builtins); remove them so they
       // don't accumulate with each reanalysis.
       this.forgetOccurrencesIn_(path);
-      const [context, module, tokens] =
+      const [context, module, tokens, semanticProblems] =
           generateSemanticTokens(path, this, parsed.module);
       const info: SemanticDocInfo = {
         path: path,
         context: context,
         module: module,
         tokens: tokens,
-        problems: parsed.problems,
+        problems: [
+          ...parsed.problems,
+          ...semanticProblems,
+          ...this.checkImports_(path, module),
+        ],
       };
       this.docs_.set(path, info);
       return info;
@@ -133,6 +137,39 @@ export class SemanticAnalyzer {
       this.docs_.set(path, info);
       return info;
     }
+  }
+
+  // Reports imports of modules that can't be found: neither a standard library
+  // module nor a file in the workspace or next to the importing file.
+  private checkImports_(filePath: string, module: SemanticModule):
+      ParseProblem[] {
+    const problems: ParseProblem[] = [];
+    const libsLoaded = this.libNamesToFilePaths_.size > 0;
+    for (const imprt of module.imports) {
+      const source = imprt.ast.source;
+      const isPath = source.kind === 'StringExpr';
+      const name = isPath ? source.token.text.replace(/^i?'|'$/g, '') :
+                            source.token.text;
+      if (!isPath && this.libNamesToFilePaths_.has(name)) {
+        continue;
+      }
+      const dirs = [...this.workspacePaths_, path.dirname(filePath)];
+      if (dirs.some(dir => existsSync(path.join(dir, name + '.zn')))) {
+        continue;
+      }
+      // Without the standard library, a module name may be one of its modules.
+      if (!isPath && !libsLoaded) {
+        continue;
+      }
+      problems.push({
+        message: `Module '${name}' not found.`,
+        row: source.token.pos.rowBegin - 1,
+        col: source.token.pos.columnBegin - 1,
+        length: source.token.text.length,
+        severity: 'warning',
+      });
+    }
+    return problems;
   }
 
   private forgetOccurrencesIn_(path: string): void {
@@ -163,6 +200,15 @@ export class SemanticAnalyzer {
   async parseDocument(params: SemanticTokensParams2): Promise<SemanticDocInfo> {
     await this.initPromise_;
     return this.parseDocumentWithoutWaitingForLibs_(params);
+  }
+
+  // Whether [filePath] is a standard library module, either as fetched or in a
+  // checkout of zinnia.
+  isStandardLibraryFile(filePath: string): boolean {
+    const match = /(?:^|\/)zinnia\/lib\/([a-z_]+)\.zn$/.exec(filePath);
+    return match !== null &&
+        (this.libNamesToFilePaths_.size === 0 ||
+         this.libNamesToFilePaths_.has(match[1]));
   }
 
   lookupDocInfoFromFile(filePath: string): SemanticDocInfo|undefined {
