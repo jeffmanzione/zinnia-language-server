@@ -1,4 +1,3 @@
-import {buildLexer} from 'typescript-parsec';
 
 export enum TokenKind {
   LITERAL_STRING,
@@ -90,10 +89,15 @@ export enum TokenKind {
   NEWLINE,
   COMMENT_LINE,
   COMMENT_BLOCK,
-  SPACE
+  SPACE,
+  // A character that starts no token.
+  UNKNOWN
 }
 
-export const zinniaTokenizer = buildLexer([
+// Each rule is [keep, pattern, kind]. Tokens that aren't kept (comments and
+// spaces) are skipped. At each position the longest match wins, and the
+// earliest rule wins a tie, so keywords beat identifiers of the same length.
+export const TOKEN_RULES: [boolean, RegExp, TokenKind][] = [
   // A backslash escapes the next character, including another backslash.
   [true, /^i?'(\\.|[^'\\])*'/g, TokenKind.LITERAL_STRING],
   [true, /^\d+\.\d+/g, TokenKind.LITEARL_FLOAT],
@@ -183,7 +187,92 @@ export const zinniaTokenizer = buildLexer([
   [true, /^\./g, TokenKind.SYMBOL_PERIOD],
 
   [true, /^\$?[a-zA-Z_][a-zA-Z0-9_]*/g, TokenKind.IDENTIFIER],
-  [false, /^;[^\n]*\n/g, TokenKind.COMMENT_LINE],
+  // A line comment ends before the new line, which still separates lines.
+  [false, /^;[^\n]*/g, TokenKind.COMMENT_LINE],
   [false, /^\/\*([^*]|\*+[^/])*\*+\//g, TokenKind.COMMENT_BLOCK],
   [false, /^(?:(?!\n)\s)+/g, TokenKind.SPACE]
-]);
+];
+
+// A token's position in the text. Rows and columns are 1-based, and the end is
+// just after the token.
+export interface TokenPosition {
+  readonly index: number;
+  readonly rowBegin: number;
+  readonly columnBegin: number;
+  readonly rowEnd: number;
+  readonly columnEnd: number;
+}
+
+export interface Token {
+  readonly kind: TokenKind;
+  readonly text: string;
+  readonly pos: TokenPosition;
+  // The next token, skipping comments and spaces.
+  readonly next: Token|undefined;
+}
+
+interface MutableToken {
+  kind: TokenKind;
+  text: string;
+  pos: TokenPosition;
+  next: Token|undefined;
+}
+
+const STICKY_RULES: [boolean, RegExp, TokenKind][] = TOKEN_RULES.map(
+    ([keep, pattern, kind]) =>
+        [keep, new RegExp(pattern.source.replace(/^\^/, ''), 'y'), kind]);
+
+// Splits [text] into tokens. This never throws: a character that starts no
+// token becomes an UNKNOWN token. Each token's next is the token after it.
+export function tokenize(text: string): Token[] {
+  const tokens: MutableToken[] = [];
+  let index = 0, row = 1, col = 1;
+  while (index < text.length) {
+    let bestLength = 0, bestKind = TokenKind.UNKNOWN, keep = true;
+    for (const [ruleKeep, pattern, kind] of STICKY_RULES) {
+      pattern.lastIndex = index;
+      const match = pattern.exec(text);
+      if (match !== null && match[0].length > bestLength) {
+        bestLength = match[0].length;
+        bestKind = kind;
+        keep = ruleKeep;
+      }
+    }
+    if (bestLength === 0) {
+      bestLength = 1;
+    }
+    const tokenText = text.substr(index, bestLength);
+    let rowEnd = row, colEnd = col;
+    // Columns count UTF-16 code units, and a '\r' takes none.
+    for (let k = 0; k < tokenText.length; k++) {
+      const c = tokenText[k];
+      if (c === '\n') {
+        rowEnd++;
+        colEnd = 1;
+      } else if (c !== '\r') {
+        colEnd++;
+      }
+    }
+    if (keep) {
+      tokens.push({
+        kind: bestKind,
+        text: tokenText,
+        pos: {
+          index: index,
+          rowBegin: row,
+          columnBegin: col,
+          rowEnd: rowEnd,
+          columnEnd: colEnd,
+        },
+        next: undefined,
+      });
+    }
+    index += bestLength;
+    row = rowEnd;
+    col = colEnd;
+  }
+  for (let i = 0; i + 1 < tokens.length; i++) {
+    tokens[i].next = tokens[i + 1];
+  }
+  return tokens;
+}

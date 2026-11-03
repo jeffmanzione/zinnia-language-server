@@ -1,12 +1,8 @@
-import * as parsec from 'typescript-parsec';
 
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
 import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
-import {TokenKind} from './tokenizer';
-
-type Token = parsec.Token<TokenKind>;
-
+import {Token, TokenKind} from './tokenizer';
 
 export interface SemanticToken {
   text: string;
@@ -438,7 +434,6 @@ function generateTokensForConstant(
   }
 }
 
-
 function generateTokensForString(
     strng: SemanticString, context: SemanticContext,
     generator: TokenGenerator): void {
@@ -490,14 +485,12 @@ function generateTokensForIdentifier(
   id.markGenerated();
 }
 
-
 function generateTokensForAssign(
     asgn: SemanticAssign, context: SemanticContext,
     generator: TokenGenerator): void {
   generateTokensForAssignLhs(asgn.lhs, context, generator);
   generateTokensForExpression(asgn.rhs, context, generator);
 }
-
 
 function generateTokensForAnnotation(
     annot: SemanticAnnotation, context: SemanticContext,
@@ -545,7 +538,8 @@ function generateTokensForPostfix(
     if (nestedExpr == null) {
       continue;
     }
-    if ('nextToken' in nestedExpr) {
+    // Member names are tokens; everything else is an expression.
+    if (!('ast' in nestedExpr)) {
       const tok = nestedExpr as Token;
       const foundId = lookupMemberFromPossibleModule(
           curId as SemanticIdentifier, tok, context);
@@ -565,7 +559,7 @@ function generateTokensForPostfix(
 
       generator.createToken(
           tok,
-          tok.next!.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property');
+          tok.next?.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property');
     } else {
       generateTokensForExpression(
           nestedExpr as SemanticExpression, context, generator);
@@ -958,7 +952,6 @@ function processIdentifier(
   return identifier;
 }
 
-
 function processAnnotation(
     annot: AnnotationExpr, context: SemanticContext): SemanticAnnotation {
   const first = processIdentifier(annot.firstPart, context, 'decorator');
@@ -1056,7 +1049,6 @@ function processCondition(
   };
 }
 
-
 function processRange(
     expr: RangeExpr, context: SemanticContext): SemanticRange {
   return {
@@ -1146,7 +1138,6 @@ function processConstant(
   };
 }
 
-
 function processString(
     expr: StringExpr, context: SemanticContext): SemanticString {
   return {ast: expr, text: expr.text};
@@ -1182,7 +1173,6 @@ function processAssign(
     rhs: processExpression(expr.rhs, context)
   };
 }
-
 
 function processFunction(
     stat: FunctionStat, context: SemanticContext): SemanticFunction {

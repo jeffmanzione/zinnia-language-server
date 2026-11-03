@@ -1,8 +1,5 @@
-import * as parsec from 'typescript-parsec';
-import { TokenKind } from './tokenizer';
+import {Token, TokenKind} from './tokenizer';
 import { AnnotationExpr, AssignExpr, AssignLhsExpr, ConditionExpr, Expression, IdentifierExpr, NewExpr, ParamExpr, PostfixExpr, StringExpr, TupleExpr } from './expressions';
-
-type Token = parsec.Token<TokenKind>;
 
 export interface ImportStat {
 	kind: 'ImportStat' | 'ImportAsStat';

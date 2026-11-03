@@ -1,1306 +1,1593 @@
-import * as parsec from 'typescript-parsec';
-import {alt_sc, apply, kleft, kmid, kright, list_sc, nil, opt_sc, rep_sc, rule, seq, tok} from 'typescript-parsec';
+// A recursive-descent parser for Zinnia that recovers from syntax errors.
+//
+// The grammar is a PEG: alternatives are tried in order and the first match
+// wins, and repetition is greedy. Each rule's result is cached per position
+// (packrat parsing), so the parser runs in linear time even though rules
+// re-parse prefixes when an alternative fails.
+//
+// The parser first parses strictly. If that fails, it parses again in recovery
+// mode, where a statement or class member that doesn't parse is reported and
+// skipped, so the rest of the file still yields an AST.
 
-import {AddExpr, AndExpr, AnnotationExpr, AnonExpr, ArrayExpr, ArrayIndexExpr, AssignArrayExpr, AssignExpr, AssignLhsExpr, AssignTupleExpr, BinaryExpr, BoolExpr, ConditionExpr, ConstantExpr, EmptyParensExpr, EqualExpr, Expression, FloatExpr, FunctionCallExpr, IdentifierExpr, InExpr, IntExpr, IsExpr, isPrimaryExpr, LengthExpr, MapEntryExpr, MapExpr, MemberAccessExpr, MultExpr, NamedArgExpr, NewExpr, NoneExpr, OrExpr, ParamExpr, ParensExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RangeExpr, RelationExpr, StringExpr, TupleChainExpr, TupleExpr, UnaryExpr} from './expressions';
+import {AddExpr, AndExpr, AnnotationExpr, AnonExpr, ArrayExpr, ArrayIndexExpr, AssignArrayExpr, AssignExpr, AssignLhsExpr, AssignTupleExpr, BinaryExpr, ConditionExpr, ConstantExpr, EmptyParensExpr, EqualExpr, Expression, FunctionCallExpr, IdentifierExpr, InExpr, IsExpr, LengthExpr, MapEntryExpr, MapExpr, MemberAccessExpr, MultExpr, NamedArgExpr, NewExpr, OrExpr, ParamExpr, ParensExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RelationExpr, StringExpr, TupleExpr, UnaryExpr} from './expressions';
 import {ClassMemberStat, ClassStat, CompoundStat, ExitStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, IterStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
-import {TokenKind} from './tokenizer';
+import {Token, TokenKind, tokenize} from './tokenizer';
 
-type Token = parsec.Token<TokenKind>;
+// A problem found while parsing. Rows and columns are 0-based. A problem with
+// no position is at the end of the document.
+export interface ParseProblem {
+  message: string;
+  row?: number;
+  col?: number;
+}
 
-// Returns a rule that caches its result for each input token (packrat
-// parsing). Many rules parse a prefix, fail on the next token and then fall
-// back to an alternative that parses the same prefix again. Without caching,
-// that repeated work multiplies with each level of nesting, so parse time
-// grows exponentially with the depth of an expression.
-function memoRule<TKind, TResult>(): parsec.Rule<TKind, TResult> {
-  const r = rule<TKind, TResult>();
-  const parse = r.parse.bind(r);
-  const cache =
-      new WeakMap<parsec.Token<TKind>, parsec.ParserOutput<TKind, TResult>>();
-  r.parse = (token: parsec.Token<TKind>|undefined) => {
-    if (token === undefined) {
-      return parse(token);
+export interface ParseResult {
+  module: Module;
+  problems: ParseProblem[];
+}
+
+// The result of a rule that matched: its value and the index after it.
+interface Match<T> {
+  v: T;
+  i: number;
+}
+
+type Result<T> = Match<T>|undefined;
+
+const IDENTIFIER_KINDS = new Set([
+  TokenKind.IDENTIFIER, TokenKind.KEYWORD_CLASS, TokenKind.KEYWORD_MODULE,
+  TokenKind.KEYWORD_ASYNC, TokenKind.KEYWORD_THEN, TokenKind.KEYWORD_FUNCTION
+]);
+
+const OPENERS = new Set(
+    [TokenKind.SYMBOL_LPAREN, TokenKind.SYMBOL_LBRACKET, TokenKind.SYMBOL_LBRACE]);
+const CLOSERS = new Set(
+    [TokenKind.SYMBOL_RPAREN, TokenKind.SYMBOL_RBRACKET, TokenKind.SYMBOL_RBRACE]);
+
+// How each kind of token is named in error messages.
+function describeKind(kind: TokenKind): string {
+  switch (kind) {
+    case TokenKind.IDENTIFIER:
+      return 'a name';
+    case TokenKind.LITERAL_STRING:
+      return 'a string';
+    case TokenKind.LITEARL_INTEGER:
+    case TokenKind.LITEARL_FLOAT:
+      return 'a number';
+    case TokenKind.NEWLINE:
+      return 'a new line';
+  }
+  const name = TokenKind[kind];
+  if (name.startsWith('KEYWORD_')) {
+    const keyword = name.slice('KEYWORD_'.length).toLowerCase();
+    return `'${keyword}'`;
+  }
+  return SYMBOL_TEXT.get(kind) ?? name;
+}
+
+const SYMBOL_TEXT = new Map<TokenKind, string>([
+  [TokenKind.SYMBOL_LPAREN, '\'(\''],   [TokenKind.SYMBOL_RPAREN, '\')\''],
+  [TokenKind.SYMBOL_LBRACE, '\'{\''],   [TokenKind.SYMBOL_RBRACE, '\'}\''],
+  [TokenKind.SYMBOL_LBRACKET, '\'[\''], [TokenKind.SYMBOL_RBRACKET, '\']\''],
+  [TokenKind.SYMBOL_EQUALS, '\'=\''],   [TokenKind.SYMBOL_COMMA, '\',\''],
+  [TokenKind.SYMBOL_COLON, '\':\''],    [TokenKind.SYMBOL_PERIOD, '\'.\''],
+  [TokenKind.SYMBOL_RARROW, '\'->\''],  [TokenKind.SYMBOL_PIPE, '\'|\''],
+]);
+
+class Parser {
+  private readonly memo = new Map<string, Map<number, Result<unknown>>>();
+  // The furthest index at which a token failed to match, and what was
+  // expected there, for error messages.
+  private furthest = -1;
+  private expected = new Set<TokenKind>();
+  readonly problems: ParseProblem[] = [];
+
+  constructor(private readonly toks: Token[], private readonly recover: boolean) {}
+
+  // Infrastructure
+
+  private fail(i: number, kind: TokenKind): undefined {
+    if (i > this.furthest) {
+      this.furthest = i;
+      this.expected = new Set([kind]);
+    } else if (i === this.furthest) {
+      this.expected.add(kind);
     }
-    let output = cache.get(token);
-    if (output === undefined) {
-      output = parse(token);
-      cache.set(token, output);
+    return undefined;
+  }
+
+  private tok(i: number, kind: TokenKind): Result<Token> {
+    const t = this.toks[i];
+    if (t !== undefined && t.kind === kind) {
+      return {v: t, i: i + 1};
     }
-    return output;
-  };
-  return r;
-}
-
-function applyIdentifier(value: Token): IdentifierExpr {
-  return {kind: 'IdentifierExpr', token: value};
-}
-
-function applyNone(value: Token): NoneExpr {
-  return {kind: 'NoneExpr', token: value};
-}
-
-function applyBool(value: Token): BoolExpr {
-  return {kind: 'BoolExpr', token: value, value: (/True/i).test(value.text)};
-}
-
-function applyInt(value: [Token|undefined, Token]): IntExpr {
-  return {
-    kind: 'IntExpr',
-    tokens: value[0] !== undefined ? [value[0], value[1]] : [value[1]],
-    value: Number(value[0] !== undefined ? '-' + value[1].text : value[1].text)
-  };
-}
-
-function applyFloat(value: [Token|undefined, Token]): FloatExpr {
-  return {
-    kind: 'FloatExpr',
-    tokens: value[0] !== undefined ? [value[0], value[1]] : [value[1]],
-    value: Number(value[0] !== undefined ? '-' + value[1].text : value[1].text)
-  };
-}
-
-function applyString(value: Token): StringExpr {
-  return {kind: 'StringExpr', token: value, text: value.text};
-}
-
-function applyNew(value: Token): NewExpr {
-  return {kind: 'NewExpr', token: value};
-}
-
-function applyTuple(exprs: Expression[]): TupleExpr {
-  if (exprs.length == 1) {
-    return exprs[0];
-  }
-  return {kind: 'TupleChainExpr', values: exprs};
-}
-
-function applyArray(tupleExpr: Token|TupleExpr|undefined): ArrayExpr {
-  if (tupleExpr == null || tupleExpr.kind === TokenKind.SYMBOL_ARRAY_ACCESS) {
-    return {kind: 'ArrayExpr', values: []};
-  }
-  const values =
-      tupleExpr.kind === 'TupleChainExpr' ? tupleExpr.values : [tupleExpr];
-  return {kind: 'ArrayExpr', values: values as TupleExpr[]};
-}
-
-function applyMapEntry(entry: [PostfixExpr, Token, PostfixExpr]): MapEntryExpr {
-  const [key, _, value] = entry;
-  return {kind: 'MapEntryExpr', key: key, value: value};
-}
-
-function applyMap(entries: MapEntryExpr[]|undefined): MapExpr {
-  return {kind: 'MapExpr', entries: entries ?? [] };
-}
-
-function applyNamedArg(entries: [IdentifierExpr, Token, Expression]):
-    NamedArgExpr {
-  const [name, colonToken, value] = entries;
-  return {
-    kind: 'NamedArgExpr',
-    name: name,
-    value: value,
-    colonToken: colonToken
-  };
-}
-
-function applyFunctionCall(
-    entries: [Token, (TupleExpr | NamedArgExpr[]), Token]): FunctionCallExpr {
-  const [lparen, expr, rparen] = entries;
-  const args: Expression[]|NamedArgExpr[] =
-      ('kind' in expr && expr.kind === 'TupleChainExpr') ?
-      (expr as TupleChainExpr).values :
-      expr instanceof Array ? (expr as NamedArgExpr[]) : [expr];
-  return {kind: 'FunctionCallExpr', args: args, lparen: lparen, rparen: rparen};
-}
-
-function applyArrayIndex(entries: [Token, TupleExpr, Token]): ArrayIndexExpr {
-  const [lbrack, indicies, rbacket] = entries;
-  return {
-    kind: 'ArrayIndexExpr',
-    indices: indicies,
-    lbrack: lbrack,
-    rbrack: rbacket
-  };
-}
-
-function applyMemberAccess(entries: [Token, (IdentifierExpr | NewExpr)]):
-    MemberAccessExpr {
-  const [period, field] = entries;
-  return {kind: 'MemberAccessExpr', field: field, period: period};
-}
-
-function applyEmptyParens(parens: [Token, Token]): EmptyParensExpr {
-  const [lparen, rparen] = parens;
-  return {kind: 'EmptyParensExpr', lparen: lparen, rparen: rparen};
-}
-
-function applyLength(expr: [Token, TupleExpr, Token]): LengthExpr {
-  const [lpipe, tupExpr, rpipe] = expr;
-  return {kind: 'LengthExpr', expr: tupExpr, lpipe: lpipe, rpipe: rpipe};
-}
-
-function applyConstIdentifier(expr: [Token, IdentifierExpr]): IdentifierExpr {
-  const [constTok, id] = expr;
-  return {...id, constTok: constTok};
-}
-
-function applyParens(expr: [Token, TupleExpr, Token]): ParensExpr {
-  const [lparen, tupExpr, rparen] = expr;
-  return {kind: 'ParensExpr', expr: tupExpr, lparen: lparen, rparen: rparen};
-}
-
-function applyPostfix(entry: PrimaryExpr|[PrimaryExpr, PostfixExpr1[]]):
-    PostfixExpr {
-  if (isPrimaryExpr(entry)) {
-    return entry as PrimaryExpr;
-  }
-  const [primary, postfixes] = entry as [PrimaryExpr, PostfixExpr1[]];
-  if (postfixes.length == 0) {
-    return primary;
-  }
-  return {kind: 'PostfixChainExpr', lhs: primary, postfixes: postfixes};
-}
-
-function applyRange(exprs: [
-  PostfixExpr, PostfixExpr|undefined, PostfixExpr|undefined
-]): RangeExpr|PostfixExpr {
-  if (exprs[1] === undefined) {
-    return exprs[0];
-  }
-  const range: RangeExpr = {
-    kind: 'RangeExpr',
-    start: exprs[0],
-    end: exprs[1],
-  };
-  if (exprs[2] !== undefined) {
-    range.inc = exprs[2];
-  }
-  return range;
-}
-
-function applyUnary(exprs: [Token[], RangeExpr|PostfixExpr]): UnaryExpr {
-  const [unaries, expr] = exprs;
-  if (unaries.length == 0) {
-    return expr;
-  }
-  return {kind: 'UnaryChainExpr', expr: expr, unaries: unaries};
-}
-
-function applyBinary(value: [BinaryExpr, [Token, BinaryExpr][]]): BinaryExpr {
-  const [lhs, rhs] = value;
-
-  if (rhs.length == 0) {
-    return lhs;
+    return this.fail(i, kind);
   }
 
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
-  }
-  return {kind: 'BinaryChainExpr', exprs: exprs, tokens: tokens};
-}
-
-function applyMult(value: [BinaryExpr, [Token, BinaryExpr][]]): MultExpr {
-  const [lhs, rhs] = value;
-
-  if (rhs.length == 0) {
-    return lhs;
+  private tokIn(i: number, kinds: TokenKind[]): Result<Token> {
+    for (const kind of kinds) {
+      const r = this.tok(i, kind);
+      if (r !== undefined) {
+        return r;
+      }
+    }
+    return undefined;
   }
 
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
-  }
-  return {kind: 'MultChainExpr', exprs: exprs, tokens: tokens};
-}
-
-function applyAdd(value: [MultExpr, [Token, MultExpr][]]): AddExpr {
-  const [lhs, rhs] = value;
-
-  if (rhs.length == 0) {
-    return lhs;
+  private cached<T>(name: string, i: number, parse: () => Result<T>): Result<T> {
+    let table = this.memo.get(name);
+    if (table === undefined) {
+      table = new Map();
+      this.memo.set(name, table);
+    }
+    if (table.has(i)) {
+      return table.get(i) as Result<T>;
+    }
+    const r = parse();
+    table.set(i, r);
+    return r;
   }
 
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
-  }
-  return {kind: 'AddChainExpr', exprs: exprs, tokens: tokens};
-}
-
-function applyIn(expr: [AddExpr, [Token, AddExpr]|undefined]): InExpr|AddExpr {
-  const [lhs, suffix] = expr;
-  if (suffix === undefined) {
-    return lhs;
-  }
-  const [inTok, rhs] = suffix;
-  return {kind: 'InExpr', lhs: lhs, rhs: rhs, inTok: inTok};
-}
-
-function applyRelation(
-    value: [IsExpr|InExpr|AddExpr, [Token, IsExpr | InExpr | AddExpr][]]):
-    RelationExpr {
-  const [lhs, rhs] = value;
-
-  if (rhs.length == 0) {
-    return lhs;
+  // Skips new lines.
+  private lines(i: number): number {
+    while (this.toks[i]?.kind === TokenKind.NEWLINE) {
+      i++;
+    }
+    return i;
   }
 
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
-  }
-  return {kind: 'RelationChainExpr', exprs: exprs, tokens: tokens};
-}
-
-function applyEqual(value: [RelationExpr, [Token, RelationExpr][]]): EqualExpr {
-  const [lhs, rhs] = value;
-
-  if (rhs.length == 0) {
-    return lhs;
-  }
-
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
-  }
-  return {kind: 'EqualChainExpr', exprs: exprs, tokens: tokens};
-}
-
-function applyAnd(value: [EqualExpr, [Token, EqualExpr][]]): AndExpr {
-  const [lhs, rhs] = value;
-
-  if (rhs.length == 0) {
-    return lhs;
+  // Parses [item] separated by [sep], at least once. A separator not followed
+  // by an item is left unconsumed.
+  private list<T>(i: number, item: (i: number) => Result<T>, sep: TokenKind):
+      Result<T[]> {
+    const first = item(i);
+    if (first === undefined) {
+      return undefined;
+    }
+    const values = [first.v];
+    i = first.i;
+    while (true) {
+      const s = this.tok(i, sep);
+      const next = s && item(s.i);
+      if (next === undefined) {
+        break;
+      }
+      values.push(next.v);
+      i = next.i;
+    }
+    return {v: values, i: i};
   }
 
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
+  // Parses [first] followed by any number of (one of [ops], [operand]), as
+  // used by the binary operator rules.
+  private chain<T>(
+      i: number, operand: (i: number) => Result<T>, ops: TokenKind[]):
+      Result<[T, Token[], T[]]> {
+    const first = operand(i);
+    if (first === undefined) {
+      return undefined;
+    }
+    i = first.i;
+    const tokens: Token[] = [];
+    const exprs = [first.v];
+    while (true) {
+      const op = this.tokIn(i, ops);
+      const rhs = op && operand(op.i);
+      if (rhs === undefined) {
+        break;
+      }
+      tokens.push(op!.v);
+      exprs.push(rhs.v);
+      i = rhs.i;
+    }
+    return {v: [first.v, tokens, exprs], i: i};
   }
-  return {kind: 'AndChainExpr', exprs: exprs, tokens: tokens};
-}
 
-function applyOr(value: [AndExpr, [Token, AndExpr][]]): OrExpr {
-  const [lhs, rhs] = value;
+  // Literals and identifiers
 
-  if (rhs.length == 0) {
-    return lhs;
+  identifier(i: number): Result<IdentifierExpr> {
+    const t = this.toks[i];
+    if (t !== undefined && IDENTIFIER_KINDS.has(t.kind)) {
+      return {v: {kind: 'IdentifierExpr', token: t}, i: i + 1};
+    }
+    return this.fail(i, TokenKind.IDENTIFIER);
   }
 
-  const exprs = [lhs];
-  const tokens = [];
-  for (const [tok, expr] of rhs) {
-    exprs.push(expr);
-    tokens.push(tok);
+  private newExpr(i: number): Result<NewExpr> {
+    const r = this.tok(i, TokenKind.KEYWORD_NEW);
+    return r && {v: {kind: 'NewExpr', token: r.v}, i: r.i};
   }
-  return {kind: 'OrChainExpr', exprs: exprs, tokens: tokens};
-}
 
-function applyIs(expr: [InExpr|AddExpr, [Token, InExpr | AddExpr]|undefined]):
-    IsExpr|InExpr|AddExpr {
-  const [lhs, suffix] = expr;
-  if (suffix === undefined) {
-    return lhs;
+  private constant(i: number): Result<ConstantExpr> {
+    const bool = this.tokIn(i, [TokenKind.KEYWORD_TRUE, TokenKind.KEYWORD_FALSE]);
+    if (bool !== undefined) {
+      return {
+        v: {kind: 'BoolExpr', token: bool.v, value: (/True/i).test(bool.v.text)},
+        i: bool.i
+      };
+    }
+    const none = this.tok(i, TokenKind.KEYWORD_NULL);
+    if (none !== undefined) {
+      return {v: {kind: 'NoneExpr', token: none.v}, i: none.i};
+    }
+    for (const [kind, exprKind] of [
+             [TokenKind.LITEARL_FLOAT, 'FloatExpr'],
+             [TokenKind.LITEARL_INTEGER, 'IntExpr']
+    ] as const) {
+      const minus = this.tok(i, TokenKind.SYMBOL_MINUS);
+      const number = this.tok(minus?.i ?? i, kind);
+      if (number !== undefined) {
+        const tokens = minus ? [minus.v, number.v] : [number.v];
+        const text = minus ? '-' + number.v.text : number.v.text;
+        return {
+          v: {kind: exprKind, tokens: tokens, value: Number(text)} as ConstantExpr,
+          i: number.i
+        };
+      }
+    }
+    return undefined;
   }
-  const [isTok, rhs] = suffix;
-  return {kind: 'IsExpr', lhs: lhs, rhs: rhs, isTok: isTok};
-}
 
-function applyCondition(
-    expr:
-        [
-          Token, OrExpr, Token|undefined, ConditionExpr, Token|undefined,
-          ConditionExpr
-        ]|[Token, OrExpr, Token | undefined, ConditionExpr]|OrExpr):
-    ConditionExpr {
-  if ('kind' in expr) {
-    return expr;
+  private string(i: number): Result<StringExpr> {
+    const r = this.tok(i, TokenKind.LITERAL_STRING);
+    return r && {v: {kind: 'StringExpr', token: r.v, text: r.v.text}, i: r.i};
   }
-  if (expr.length == 6) {
-    const [_if, cond, _then, ifTrue, _else, ifFalse] = expr;
+
+  // Structures
+
+  private array(i: number): Result<ArrayExpr> {
+    const empty = this.tok(i, TokenKind.SYMBOL_ARRAY_ACCESS);
+    if (empty !== undefined) {
+      return {v: {kind: 'ArrayExpr', values: []}, i: empty.i};
+    }
+    const lbrack = this.tok(i, TokenKind.SYMBOL_LBRACKET);
+    if (lbrack === undefined) {
+      return undefined;
+    }
+    const tuple = this.tuple(lbrack.i);
+    const rbrack = this.tok(tuple?.i ?? lbrack.i, TokenKind.SYMBOL_RBRACKET);
+    if (rbrack === undefined) {
+      return undefined;
+    }
+    const values = tuple === undefined ? [] :
+        tuple.v.kind === 'TupleChainExpr' ? tuple.v.values :
+                                            [tuple.v];
+    return {v: {kind: 'ArrayExpr', values: values}, i: rbrack.i};
+  }
+
+  private mapEntry(i: number): Result<MapEntryExpr> {
+    const key = this.postfix(this.lines(i));
+    const colon = key && this.tok(key.i, TokenKind.SYMBOL_COLON);
+    const value = colon && this.postfix(colon.i);
+    if (value === undefined) {
+      return undefined;
+    }
     return {
-      kind: 'ConditionBaseExpr', if: _if, condition: cond, then: _then,
-          ifTrue: ifTrue, else: _else, ifFalse: ifFalse,
+      v: {kind: 'MapEntryExpr', key: key!.v, value: value.v},
+      i: this.lines(value.i)
     };
   }
-  // Must be length 4.
-  const [_if, cond, _then, ifTrue] = expr;
-  return {
-    kind: 'ConditionBaseExpr', if: _if, condition: cond, then: _then,
-        ifTrue: ifTrue,
-  };
-}
 
-function applyAssignTuple(expr: [Token, AssignLhsExpr[], Token]):
-    AssignTupleExpr {
-  const [lparen, assigns, rparen] = expr;
-  return {
-    kind: 'AssignTupleExpr',
-    assigns: assigns ?? [],
-    lparen :
-    lparen,
-    rparen: rparen
-  };
-}
-
-function applyAssignArray(expr: [Token, AssignLhsExpr[], Token]):
-    AssignArrayExpr {
-  const [lbrack, assigns, rbrack] = expr;
-  return {
-    kind: 'AssignArrayExpr',
-    assigns: assigns ?? [],
-    lbrack :
-    lbrack,
-    rbrack: rbrack
-  };
-}
-
-function applyAssignLhs(expr: AssignTupleExpr|AssignArrayExpr|PostfixExpr|
-                        IdentifierExpr): AssignLhsExpr {
-  return expr;
-}
-
-function applyAssign(expr: [AssignLhsExpr, Token, ConditionExpr]|
-                     ConditionExpr): AssignExpr {
-  if ('kind' in expr) {
-    return expr;
-  }
-  const [lhs, eq, rhs] = expr;
-  return {kind: 'AssignBaseExpr', lhs: lhs, rhs: rhs, eq: eq};
-}
-
-function applyForeach(expr: [
-  Token, Token, AssignLhsExpr, Token, ConditionExpr, Token, Statement
-]|[Token, AssignLhsExpr, Token, ConditionExpr, Statement]): ForeachStat {
-  if (expr.length == 7) {
-    const [forTok, lparen, lhs, inTok, iter, rparen, stat] = expr;
+  private map(i: number): Result<MapExpr> {
+    const lbrace = this.tok(this.lines(i), TokenKind.SYMBOL_LBRACE);
+    if (lbrace === undefined) {
+      return undefined;
+    }
+    const start = this.lines(lbrace.i);
+    const entries = this.list(start, j => this.mapEntry(j), TokenKind.SYMBOL_COMMA);
+    const rbrace =
+        this.tok(this.lines(entries?.i ?? start), TokenKind.SYMBOL_RBRACE);
+    if (rbrace === undefined) {
+      return undefined;
+    }
     return {
-      kind: 'ForeachStat',
-      forTok: forTok,
-      lparen: lparen,
-      lhs: lhs,
-      inTok: inTok,
-      iter: iter,
-      rparen: rparen,
-      stat: stat
+      v: {kind: 'MapExpr', entries: entries?.v ?? []},
+      i: this.lines(rbrace.i)
     };
   }
-  const [forTok, lhs, inTok, iter, stat] = expr;
-  return {
-    kind: 'ForeachStat',
-    forTok: forTok,
-    lhs: lhs,
-    inTok: inTok,
-    iter: iter,
-    stat: stat
-  };
-}
 
-function applyFor(expr:
-                      [
-                        Token, Token, AssignExpr, Token, ConditionExpr, Token,
-                        AssignExpr, Token, Statement
-                      ]|[Token, AssignExpr, Token, ConditionExpr, Token,
-                         AssignExpr, Statement]): ForStat {
-  if (expr.length == 9) {
-    const [forTok, lparen, first, comma1, second, comma2, third, rparen, stat] =
-        expr;
+  // Primary
+
+  private parens(i: number): Result<ParensExpr> {
+    const lparen = this.tok(i, TokenKind.SYMBOL_LPAREN);
+    const expr = lparen && this.tuple(lparen.i);
+    const rparen = expr && this.tok(expr.i, TokenKind.SYMBOL_RPAREN);
+    if (rparen === undefined) {
+      return undefined;
+    }
     return {
-      kind: 'ForStat',
-      forTok: forTok,
-      lparen: lparen,
-      first: first,
-      comma1: comma1,
-      second: second,
-      comma2: comma2,
-      third: third,
-      rparen: rparen,
-      stat: stat
+      v: {kind: 'ParensExpr', expr: expr!.v, lparen: lparen!.v, rparen: rparen.v},
+      i: rparen.i
     };
   }
-  const [forTok, first, comma1, second, comma2, third, stat] = expr;
-  return {
-    kind: 'ForStat',
-    forTok: forTok,
-    first: first,
-    comma1: comma1,
-    second: second,
-    comma2: comma2,
-    third: third,
-    stat: stat
-  };
-}
 
-function applyWhile(expr: [
-  Token, Token, ConditionExpr, Token, Statement
-]|[Token, ConditionExpr, Statement]): WhileStat {
-  if (expr.length == 5) {
-    const [whileTok, lparen, cond, rparen, stat] = expr;
+  private length(i: number): Result<LengthExpr> {
+    const lpipe = this.tok(i, TokenKind.SYMBOL_PIPE);
+    const expr = lpipe && this.tuple(lpipe.i);
+    const rpipe = expr && this.tok(expr.i, TokenKind.SYMBOL_PIPE);
+    if (rpipe === undefined) {
+      return undefined;
+    }
     return {
-      kind: 'WhileStat',
-      whileTok: whileTok,
-      lparen: lparen,
-      cond: cond,
-      rparen: rparen,
-      stat: stat
+      v: {kind: 'LengthExpr', expr: expr!.v, lpipe: lpipe!.v, rpipe: rpipe.v},
+      i: rpipe.i
     };
   }
-  const [whileTok, cond, stat] = expr;
-  return {kind: 'WhileStat', whileTok: whileTok, cond: cond, stat: stat};
-}
 
-function applyCompound(expr: [Token, Statement[], Token]): CompoundStat {
-  const [lbrace, stats, rbrace] = expr;
-  return {kind: 'CompoundStat', lbrace: lbrace, stats: stats, rbrace: rbrace};
-}
+  private primary(i: number, withConstants: boolean): Result<PrimaryExpr> {
+    return this.anon(i) ?? this.identifier(i) ??
+        (withConstants ? this.newExpr(i) ?? this.constant(i) : undefined) ??
+        this.string(i) ?? this.array(i) ?? this.map(i) ?? this.parens(i) ??
+        this.length(i);
+  }
 
-function applySelect(
-	expr: [Token, TupleExpr, Statement, [Token, Statement]?]
-): SelectStat {
-  if (expr[3] !== undefined) {
-    const [ifTok, cond, ifTrue, [elseTok, ifFalse]] = expr;
+  // Postfix
+
+  private namedArg(i: number): Result<NamedArgExpr> {
+    const name = this.identifier(this.lines(i));
+    const colon = name && this.tok(this.lines(name.i), TokenKind.SYMBOL_COLON);
+    const value = colon && this.condition(this.lines(colon.i));
+    if (value === undefined) {
+      return undefined;
+    }
     return {
-      kind: 'SelectStat',
-      ifTok: ifTok,
-      cond: cond,
-      ifTrue: ifTrue,
-      elseTok: elseTok,
-      ifFalse: ifFalse
+      v: {
+        kind: 'NamedArgExpr',
+        name: name!.v,
+        value: value.v,
+        colonToken: colon!.v
+      },
+      i: this.lines(value.i)
     };
   }
-  const [ifTok, cond, ifTrue] = expr;
-  return {kind: 'SelectStat', ifTok: ifTok, cond: cond, ifTrue: ifTrue};
-}
 
-function applyExit(expr: [Token, AssignExpr?]): ExitStat {
-  const [exit, val] = expr;
-  return {kind: 'ExitStat', exit: exit, expr: val};
-}
-
-function applyRaise(expr: [Token, AssignExpr]): RaiseStat {
-  const [raise, val] = expr;
-  return {kind: 'RaiseStat', raise: raise, expr: val};
-}
-
-function applyTry(expr: [Token, Statement, Token, AssignLhsExpr, Statement]):
-    TryStat {
-  const [tryTok, stat, catchTok, catchAssign, catchStat] = expr;
-  return {
-    kind: 'TryStat',
-    tryTok: tryTok,
-    stat: stat,
-    catchTok: catchTok,
-    catchAssign: catchAssign,
-    catchStat: catchStat
-  };
-}
-
-function applyJump(expr: [Token, TupleExpr]|Token): JumpStat {
-  if ('text' in expr) {
-    return {kind: 'JumpStat', token: expr};
-  }
-  const [ret, retVal] = expr;
-  return {kind: 'JumpStat', token: ret, expr: retVal};
-}
-
-function applyParam(expr: [
-  Token|undefined, IdentifierExpr, [Token, ConditionExpr]|undefined
-]): ParamExpr {
-  const [field, name, defaultValExpr] = expr;
-  if (defaultValExpr !== undefined) {
-    const [eq, defaultVal] = defaultValExpr;
+  // Parses `name: value, ...` or a tuple, as in calls and annotations.
+  private args(i: number): Result<Expression[]|NamedArgExpr[]> {
+    const named = this.list(i, j => this.namedArg(j), TokenKind.SYMBOL_COMMA);
+    if (named !== undefined) {
+      return named;
+    }
+    const tuple = this.tuple(i);
+    if (tuple === undefined) {
+      return undefined;
+    }
     return {
-      kind: 'ParamExpr',
-      field: field,
-      name: name,
-      eq: eq,
-      defaultValue: defaultVal
+      v: tuple.v.kind === 'TupleChainExpr' ? tuple.v.values : [tuple.v],
+      i: tuple.i
     };
   }
-  return {kind: 'ParamExpr', name: name, field: field};
-}
 
-function applyAnnotation(expr: [
-  Token, IdentifierExpr, IdentifierExpr|undefined,
-  [Token, TupleExpr | NamedArgExpr[], Token]|undefined
-]): AnnotationExpr {
-  const [at, firstPart, secondPart, thirdPart] = expr;
-  if (thirdPart == null) {
+  private postfixSuffix(i: number): Result<PostfixExpr1> {
+    const lbrack = this.tok(i, TokenKind.SYMBOL_LBRACKET);
+    if (lbrack !== undefined) {
+      const indices = this.tuple(lbrack.i);
+      const rbrack = indices && this.tok(indices.i, TokenKind.SYMBOL_RBRACKET);
+      if (rbrack !== undefined) {
+        return {
+          v: {
+            kind: 'ArrayIndexExpr',
+            indices: indices!.v,
+            lbrack: lbrack.v,
+            rbrack: rbrack.v
+          } satisfies ArrayIndexExpr,
+          i: rbrack.i
+        };
+      }
+    }
+    const lparen = this.tok(i, TokenKind.SYMBOL_LPAREN);
+    if (lparen !== undefined) {
+      const rparen = this.tok(lparen.i, TokenKind.SYMBOL_RPAREN);
+      if (rparen !== undefined) {
+        return {
+          v: {
+            kind: 'EmptyParensExpr',
+            lparen: lparen.v,
+            rparen: rparen.v
+          } satisfies EmptyParensExpr,
+          i: rparen.i
+        };
+      }
+      const args = this.args(lparen.i);
+      const close = args && this.tok(args.i, TokenKind.SYMBOL_RPAREN);
+      if (close !== undefined) {
+        return {
+          v: {
+            kind: 'FunctionCallExpr',
+            args: args!.v,
+            lparen: lparen.v,
+            rparen: close.v
+          } satisfies FunctionCallExpr,
+          i: close.i
+        };
+      }
+    }
+    const period = this.tok(this.lines(i), TokenKind.SYMBOL_PERIOD);
+    const field = period && (this.identifier(period.i) ?? this.newExpr(period.i));
+    if (field !== undefined) {
+      return {
+        v: {
+          kind: 'MemberAccessExpr',
+          field: field.v,
+          period: period!.v
+        } satisfies MemberAccessExpr,
+        i: field.i
+      };
+    }
+    return undefined;
+  }
+
+  postfix(i: number): Result<PostfixExpr> {
+    return this.cached<PostfixExpr>('postfix', i, () => {
+      const primary = this.primary(i, false);
+      if (primary !== undefined) {
+        const postfixes: PostfixExpr1[] = [];
+        let j = primary.i;
+        while (true) {
+          const suffix = this.postfixSuffix(j);
+          if (suffix === undefined) {
+            break;
+          }
+          postfixes.push(suffix.v);
+          j = suffix.i;
+        }
+        const value: PostfixExpr = postfixes.length === 0 ? primary.v : {
+          kind: 'PostfixChainExpr',
+          lhs: primary.v,
+          postfixes: postfixes
+        };
+        return {v: value, i: this.lines(j)};
+      }
+      return this.primary(i, true);
+    });
+  }
+
+  // Operators
+
+  private range(i: number): Result<PostfixExpr> {
+    const start = this.postfix(i);
+    if (start === undefined) {
+      return undefined;
+    }
+    const colon1 = this.tok(start.i, TokenKind.SYMBOL_COLON);
+    const end = colon1 && this.postfix(colon1.i);
+    if (end === undefined) {
+      return start;
+    }
+    const colon2 = this.tok(end.i, TokenKind.SYMBOL_COLON);
+    const inc = colon2 && this.postfix(colon2.i);
+    const value = {kind: 'RangeExpr', start: start.v, end: end.v} as any;
+    if (inc !== undefined) {
+      value.inc = inc.v;
+    }
+    return {v: value, i: inc?.i ?? end.i};
+  }
+
+  private unary(i: number): Result<UnaryExpr> {
+    return this.cached<UnaryExpr>('unary', i, () => {
+      const unaries: Token[] = [];
+      let j = i;
+      while (true) {
+        const op = this.tokIn(j, [
+          TokenKind.SYMBOL_TILDE, TokenKind.SYMBOL_EXCLAIM,
+          TokenKind.SYMBOL_MINUS, TokenKind.KEYWORD_AWAIT
+        ]);
+        if (op === undefined) {
+          break;
+        }
+        unaries.push(op.v);
+        j = op.i;
+      }
+      const expr = this.range(j);
+      if (expr === undefined) {
+        return undefined;
+      }
+      if (unaries.length === 0) {
+        return expr;
+      }
+      return {
+        v: {kind: 'UnaryChainExpr', expr: expr.v, unaries: unaries},
+        i: expr.i
+      };
+    });
+  }
+
+  // Builds a chain expression of [kind] if there is more than one operand.
+  private chainExpr<T, R>(
+      kind: string, r: Result<[T, Token[], T[]]>): Result<R> {
+    if (r === undefined) {
+      return undefined;
+    }
+    const [first, tokens, exprs] = r.v;
+    if (tokens.length === 0) {
+      return {v: first as unknown as R, i: r.i};
+    }
+    return {v: {kind: kind, exprs: exprs, tokens: tokens} as R, i: r.i};
+  }
+
+  private binaryAnd(i: number): Result<BinaryExpr> {
+    return this.chainExpr(
+        'BinaryChainExpr',
+        this.chain(i, j => this.unary(j), [TokenKind.SYMBOL_AMPER]));
+  }
+
+  private binaryXor(i: number): Result<BinaryExpr> {
+    return this.chainExpr(
+        'BinaryChainExpr',
+        this.chain(i, j => this.binaryAnd(j), [TokenKind.SYMBOL_CARET]));
+  }
+
+  private binaryOr(i: number): Result<BinaryExpr> {
+    return this.chainExpr(
+        'BinaryChainExpr',
+        this.chain(i, j => this.binaryXor(j), [TokenKind.SYMBOL_PIPE]));
+  }
+
+  private mult(i: number): Result<MultExpr> {
+    return this.chainExpr(
+        'MultChainExpr',
+        this.chain(i, j => this.binaryOr(j), [
+          TokenKind.SYMBOL_STAR, TokenKind.SYMBOL_FSLASH, TokenKind.SYMBOL_PERCENT
+        ]));
+  }
+
+  private add(i: number): Result<AddExpr> {
+    return this.chainExpr(
+        'AddChainExpr',
+        this.chain(
+            i, j => this.mult(j), [TokenKind.SYMBOL_PLUS, TokenKind.SYMBOL_MINUS]));
+  }
+
+  private inExpr(i: number): Result<InExpr|AddExpr> {
+    const lhs = this.add(i);
+    if (lhs === undefined) {
+      return undefined;
+    }
+    const op =
+        this.tokIn(lhs.i, [TokenKind.KEYWORD_IN, TokenKind.KEYWORD_NOTIN]);
+    const rhs = op && this.add(op.i);
+    if (rhs === undefined) {
+      return lhs;
+    }
     return {
-      kind: 'AnnotationExpr',
-      at: at,
-      firstPart: firstPart,
-      secondPart: secondPart,
+      v: {kind: 'InExpr', lhs: lhs.v, rhs: rhs.v, inTok: op!.v},
+      i: rhs.i
     };
   }
-  const [lparen, argsExpr, rparen] = thirdPart;
-  const args: Expression[]|NamedArgExpr[] =
-      ('kind' in argsExpr && argsExpr.kind === 'TupleChainExpr') ?
-      (argsExpr as TupleChainExpr).values :
-      argsExpr instanceof Array ? (argsExpr as NamedArgExpr[]) : [argsExpr];
-  return {
-    kind: 'AnnotationExpr',
-    at: at,
-    firstPart: firstPart,
-    secondPart: secondPart,
-    args: args,
-    lparen: lparen,
-    rparen: rparen
-  };
-}
 
-function applyFunction(expr: [
-  AnnotationExpr[]|undefined, Token, IdentifierExpr, Token,
-  [Token, ParamExpr[], Token]|ParamExpr[]|undefined, Token, Token|undefined,
-  Statement
-]): FunctionStat {
-  const [annots, defTok, name, lparen, paramsExpr, rparen, asyncTok, stat] =
-      expr;
-  if (paramsExpr === undefined) {
+  private isExpr(i: number): Result<IsExpr|InExpr|AddExpr> {
+    const lhs = this.inExpr(i);
+    if (lhs === undefined) {
+      return undefined;
+    }
+    const op = this.tok(lhs.i, TokenKind.KEYWORD_IS);
+    const rhs = op && this.inExpr(op.i);
+    if (rhs === undefined) {
+      return lhs;
+    }
     return {
-      kind: 'FunctionStat',
-      defTok: defTok,
-      name: name,
-      lparen: lparen,
-      rparen: rparen,
-      params: [],
-      isNamed: true,
-      asyncTok: asyncTok,
-      stat: stat,
-      annots: annots ?? [] };
-  }
-  if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
-    const [_, params, __] = paramsExpr;
-    return {
-      kind: 'FunctionStat',
-      defTok: defTok,
-      name: name,
-      lparen: lparen,
-      rparen: rparen,
-      params: params,
-      isNamed: true,
-      asyncTok: asyncTok,
-      stat: stat,
-      annots: annots ?? [] };
-  }
-  return {
-    kind: 'FunctionStat',
-    defTok: defTok,
-    name: name,
-    lparen: lparen,
-    rparen: rparen,
-    params: paramsExpr as ParamExpr[],
-    isNamed: false,
-    asyncTok: asyncTok,
-    stat: stat,
-    annots: annots ?? [] };
-}
-
-function applySpecialMethodIdentifier(expr: Token):
-    SpecialMethodIdentifierExpr {
-  return {kind: 'SpecialMethodIdentifierExpr', token: expr};
-}
-
-function applyMethod(expr: [
-  AnnotationExpr[]|undefined,
-  [Token, IdentifierExpr | SpecialMethodIdentifierExpr]|NewExpr, Token,
-  [Token, ParamExpr[], Token]|ParamExpr[]|undefined, Token, Token|undefined,
-  Statement
-]): MethodStat {
-  const [annots, defExpr, lparen, paramsExpr, rparen, asyncTok, stat] = expr;
-  let methodTok, name;
-  if ('kind' in defExpr && defExpr.kind === 'NewExpr') {
-    methodTok = undefined;
-    name = defExpr;
-  } else {
-    methodTok = (defExpr as Array<any>)[0];
-    name = (defExpr as Array<any>)[1];
-  }
-  if (paramsExpr === undefined) {
-    return {
-      kind: 'MethodStat',
-      methodTok: methodTok,
-      name: name,
-      lparen: lparen,
-      rparen: rparen,
-      params: [],
-      isNamed: true,
-      asyncTok: asyncTok,
-      stat: stat,
-      annots: annots ?? [] };
-  } else if (
-      paramsExpr.length == 3 &&
-      (paramsExpr[1] instanceof Array || paramsExpr[1] === undefined)) {
-    const [_, params, __] = paramsExpr;
-    return {
-      kind: 'MethodStat',
-      methodTok: methodTok,
-      name: name,
-      lparen: lparen,
-      rparen: rparen,
-      params: params,
-      isNamed: true,
-      asyncTok: asyncTok,
-      stat: stat,
-      annots: annots ?? [] };
-  }
-  return {
-    kind: 'MethodStat',
-    methodTok: methodTok,
-    name: name,
-    lparen: lparen,
-    rparen: rparen,
-    params: paramsExpr as ParamExpr[],
-    isNamed: false,
-    asyncTok: asyncTok,
-    stat: stat,
-    annots: annots ?? [] };
-}
-
-function applyAnon(
-    expr:
-        [
-          IdentifierExpr, Token|undefined, Token, AssignExpr
-        ]|[Token, [Token, ParamExpr[], Token] | ParamExpr[] | undefined, Token,
-           Token | undefined, [Token, AssignExpr] | CompoundStat]): AnonExpr {
-  if (expr.length == 4) {
-    const [identifier, asyncToc, arrowTok, body] = expr;
-    return {
-      kind: 'AnonExpr',
-      params: [{kind: 'ParamExpr', name: identifier}],
-      asyncTok: asyncToc,
-      isNamed: false,
-      arrow: arrowTok,
-      expr: body
+      v: {kind: 'IsExpr', lhs: lhs.v, rhs: rhs.v, isTok: op!.v},
+      i: rhs.i
     };
-  } else {
-    const [lparen, paramsExpr, rparen, asyncTok, body] = expr;
+  }
 
-    let rhs: AssignExpr|CompoundStat;
-    let arrow: Token|undefined;
-    if ('kind' in body && body.kind === 'CompoundStat') {
-      rhs = body;
+  private relation(i: number): Result<RelationExpr> {
+    return this.chainExpr(
+        'RelationChainExpr', this.chain(i, j => this.isExpr(j), [
+          TokenKind.SYMBOL_LTHAN, TokenKind.SYMBOL_GTHAN,
+          TokenKind.SYMBOL_LTHANEQ, TokenKind.SYMBOL_GTHANEQ
+        ]));
+  }
+
+  private equal(i: number): Result<EqualExpr> {
+    return this.chainExpr(
+        'EqualChainExpr',
+        this.chain(
+            i, j => this.relation(j),
+            [TokenKind.SYMBOL_EQUIV, TokenKind.SYMBOL_NEQUIV]));
+  }
+
+  private and(i: number): Result<AndExpr> {
+    return this.chainExpr(
+        'AndChainExpr',
+        this.chain(i, j => this.equal(j), [TokenKind.KEYWORD_AND]));
+  }
+
+  private or(i: number): Result<OrExpr> {
+    return this.cached(
+        'or',
+        i,
+        () => this.chainExpr(
+            'OrChainExpr', this.chain(i, j => this.and(j), [TokenKind.KEYWORD_OR])));
+  }
+
+  condition(i: number): Result<ConditionExpr> {
+    return this.cached<ConditionExpr>('condition', i, () => {
+      const ifTok = this.tok(i, TokenKind.KEYWORD_IF);
+      if (ifTok !== undefined) {
+        const cond = this.or(ifTok.i);
+        if (cond !== undefined) {
+          const thenTok = this.tok(cond.i, TokenKind.KEYWORD_THEN);
+          const ifTrue = this.condition(thenTok?.i ?? cond.i);
+          if (ifTrue !== undefined) {
+            const elseTok = this.tok(ifTrue.i, TokenKind.KEYWORD_ELSE);
+            const ifFalse = elseTok && this.condition(elseTok.i);
+            if (ifFalse !== undefined) {
+              return {
+                v: {
+                  kind: 'ConditionBaseExpr',
+                  if: ifTok.v,
+                  condition: cond.v,
+                  then: thenTok?.v,
+                  ifTrue: ifTrue.v,
+                  else: elseTok!.v,
+                  ifFalse: ifFalse.v,
+                },
+                i: ifFalse.i
+              };
+            }
+            return {
+              v: {
+                kind: 'ConditionBaseExpr',
+                if: ifTok.v,
+                condition: cond.v,
+                then: thenTok?.v,
+                ifTrue: ifTrue.v,
+              },
+              i: ifTrue.i
+            };
+          }
+        }
+      }
+      return this.or(i);
+    });
+  }
+
+  // Assignment
+
+  private assignTupleOrArray(
+      i: number, open: TokenKind, close: TokenKind):
+      Result<[Token, AssignLhsExpr[], Token]> {
+    const opener = this.tok(i, open);
+    const assigns =
+        opener && this.list(opener.i, j => this.assignLhs(j), TokenKind.SYMBOL_COMMA);
+    const closer = assigns && this.tok(assigns.i, close);
+    if (closer === undefined) {
+      return undefined;
+    }
+    return {v: [opener!.v, assigns!.v, closer.v], i: closer.i};
+  }
+
+  assignLhs(i: number): Result<AssignLhsExpr> {
+    return this.cached<AssignLhsExpr>('assignLhs', i, () => {
+      const constTok = this.tok(i, TokenKind.KEYWORD_CONST);
+      const constId = constTok && this.identifier(constTok.i);
+      if (constId !== undefined) {
+        return {v: {...constId.v, constTok: constTok!.v}, i: constId.i};
+      }
+      const tuple = this.assignTupleOrArray(
+          i, TokenKind.SYMBOL_LPAREN, TokenKind.SYMBOL_RPAREN);
+      if (tuple !== undefined) {
+        const [lparen, assigns, rparen] = tuple.v;
+        return {
+          v: {
+            kind: 'AssignTupleExpr',
+            assigns: assigns,
+            lparen: lparen,
+            rparen: rparen
+          } satisfies AssignTupleExpr,
+          i: tuple.i
+        };
+      }
+      const array = this.assignTupleOrArray(
+          i, TokenKind.SYMBOL_LBRACKET, TokenKind.SYMBOL_RBRACKET);
+      if (array !== undefined) {
+        const [lbrack, assigns, rbrack] = array.v;
+        return {
+          v: {
+            kind: 'AssignArrayExpr',
+            assigns: assigns,
+            lbrack: lbrack,
+            rbrack: rbrack
+          } satisfies AssignArrayExpr,
+          i: array.i
+        };
+      }
+      return this.postfix(i) ?? this.identifier(i);
+    });
+  }
+
+  assign(i: number): Result<AssignExpr> {
+    return this.cached<AssignExpr>('assign', i, () => {
+      const lhs = this.assignLhs(i);
+      const eq = lhs && this.tok(lhs.i, TokenKind.SYMBOL_EQUALS);
+      const rhs = eq && this.condition(eq.i);
+      if (rhs !== undefined) {
+        return {
+          v: {kind: 'AssignBaseExpr', lhs: lhs!.v, rhs: rhs.v, eq: eq!.v},
+          i: rhs.i
+        };
+      }
+      return this.condition(i);
+    });
+  }
+
+  tuple(i: number): Result<TupleExpr> {
+    return this.cached<TupleExpr>('tuple', i, () => {
+      const exprs = this.list(i, j => {
+        const r = this.assign(this.lines(j));
+        return r && {v: r.v, i: this.lines(r.i)};
+      }, TokenKind.SYMBOL_COMMA);
+      if (exprs === undefined) {
+        return undefined;
+      }
+      if (exprs.v.length === 1) {
+        return {v: exprs.v[0], i: exprs.i};
+      }
+      return {v: {kind: 'TupleChainExpr', values: exprs.v}, i: exprs.i};
+    });
+  }
+
+  private expression(i: number): Result<Expression> {
+    const tuple = this.tuple(i);
+    return tuple && {v: tuple.v, i: this.lines(tuple.i)};
+  }
+
+  // Statements
+
+  private foreach(i: number): Result<ForeachStat> {
+    const forTok = this.tok(i, TokenKind.KEYWORD_FOR);
+    if (forTok === undefined) {
+      return undefined;
+    }
+    const lparen = this.tok(forTok.i, TokenKind.SYMBOL_LPAREN);
+    if (lparen !== undefined) {
+      const lhs = this.assignLhs(lparen.i);
+      const inTok = lhs && this.tok(lhs.i, TokenKind.KEYWORD_IN);
+      const iter = inTok && this.condition(inTok.i);
+      const rparen = iter && this.tok(iter.i, TokenKind.SYMBOL_RPAREN);
+      const stat = rparen && this.statement(rparen.i);
+      if (stat !== undefined) {
+        return {
+          v: {
+            kind: 'ForeachStat',
+            forTok: forTok.v,
+            lparen: lparen.v,
+            lhs: lhs!.v,
+            inTok: inTok!.v,
+            iter: iter!.v,
+            rparen: rparen!.v,
+            stat: stat.v
+          },
+          i: stat.i
+        };
+      }
+    }
+    const lhs = this.assignLhs(forTok.i);
+    const inTok = lhs && this.tok(lhs.i, TokenKind.KEYWORD_IN);
+    const iter = inTok && this.condition(inTok.i);
+    const stat = iter && this.statement(iter.i);
+    if (stat === undefined) {
+      return undefined;
+    }
+    return {
+      v: {
+        kind: 'ForeachStat',
+        forTok: forTok.v,
+        lhs: lhs!.v,
+        inTok: inTok!.v,
+        iter: iter!.v,
+        stat: stat.v
+      },
+      i: stat.i
+    };
+  }
+
+  private forStat(i: number): Result<ForStat> {
+    const forTok = this.tok(i, TokenKind.KEYWORD_FOR);
+    if (forTok === undefined) {
+      return undefined;
+    }
+    const lparen = this.tok(forTok.i, TokenKind.SYMBOL_LPAREN);
+    if (lparen !== undefined) {
+      const first = this.assign(lparen.i);
+      const comma1 = first && this.tok(first.i, TokenKind.SYMBOL_COMMA);
+      const second = comma1 && this.condition(comma1.i);
+      const comma2 = second && this.tok(second.i, TokenKind.SYMBOL_COMMA);
+      const third = comma2 && this.assign(comma2.i);
+      const rparen = third && this.tok(third.i, TokenKind.SYMBOL_RPAREN);
+      const stat = rparen && this.statement(rparen.i);
+      if (stat !== undefined) {
+        return {
+          v: {
+            kind: 'ForStat',
+            forTok: forTok.v,
+            lparen: lparen.v,
+            first: first!.v,
+            comma1: comma1!.v,
+            second: second!.v,
+            comma2: comma2!.v,
+            third: third!.v,
+            rparen: rparen!.v,
+            stat: stat.v
+          },
+          i: stat.i
+        };
+      }
+    }
+    const first = this.assign(forTok.i);
+    const comma1 = first && this.tok(first.i, TokenKind.SYMBOL_COMMA);
+    const second = comma1 && this.condition(comma1.i);
+    const comma2 = second && this.tok(second.i, TokenKind.SYMBOL_COMMA);
+    const third = comma2 && this.assign(comma2.i);
+    const stat = third && this.statement(third.i);
+    if (stat === undefined) {
+      return undefined;
+    }
+    return {
+      v: {
+        kind: 'ForStat',
+        forTok: forTok.v,
+        first: first!.v,
+        comma1: comma1!.v,
+        second: second!.v,
+        comma2: comma2!.v,
+        third: third!.v,
+        stat: stat.v
+      },
+      i: stat.i
+    };
+  }
+
+  private whileStat(i: number): Result<WhileStat> {
+    const whileTok = this.tok(i, TokenKind.KEYWORD_WHILE);
+    if (whileTok === undefined) {
+      return undefined;
+    }
+    const lparen = this.tok(whileTok.i, TokenKind.SYMBOL_LPAREN);
+    if (lparen !== undefined) {
+      const cond = this.condition(lparen.i);
+      const rparen = cond && this.tok(cond.i, TokenKind.SYMBOL_RPAREN);
+      const stat = rparen && this.statement(rparen.i);
+      if (stat !== undefined) {
+        return {
+          v: {
+            kind: 'WhileStat',
+            whileTok: whileTok.v,
+            lparen: lparen.v,
+            cond: cond!.v,
+            rparen: rparen!.v,
+            stat: stat.v
+          },
+          i: stat.i
+        };
+      }
+    }
+    const cond = this.condition(whileTok.i);
+    const stat = cond && this.statement(cond.i);
+    if (stat === undefined) {
+      return undefined;
+    }
+    return {
+      v: {kind: 'WhileStat', whileTok: whileTok.v, cond: cond!.v, stat: stat.v},
+      i: stat.i
+    };
+  }
+
+  private iter(i: number): Result<IterStat> {
+    return this.foreach(i) ?? this.forStat(i) ?? this.whileStat(i);
+  }
+
+  private compound(i: number): Result<CompoundStat> {
+    return this.cached<CompoundStat>('compound', i, () => {
+      const lbrace = this.tok(this.lines(i), TokenKind.SYMBOL_LBRACE);
+      if (lbrace === undefined) {
+        return undefined;
+      }
+      const body = this.items(
+          this.lines(lbrace.i), j => this.statement(j), /*inBlock=*/ true);
+      const end = this.lines(body.i);
+      const rbrace = this.tok(end, TokenKind.SYMBOL_RBRACE);
+      if (rbrace === undefined) {
+        const last = this.closeUnclosedBlock(lbrace.v, end);
+        return last && {
+          v: {kind: 'CompoundStat', lbrace: lbrace.v, stats: body.v, rbrace: last},
+          i: end
+        };
+      }
+      return {
+        v: {
+          kind: 'CompoundStat',
+          lbrace: lbrace.v,
+          stats: body.v,
+          rbrace: rbrace.v
+        },
+        i: this.lines(rbrace.i)
+      };
+    });
+  }
+
+  private select(i: number): Result<SelectStat> {
+    const ifTok = this.tok(i, TokenKind.KEYWORD_IF);
+    const cond = ifTok && this.tuple(ifTok.i);
+    const ifTrue = cond && this.statement(cond.i);
+    if (ifTrue === undefined) {
+      return undefined;
+    }
+    const elseTok = this.tok(ifTrue.i, TokenKind.KEYWORD_ELSE);
+    const ifFalse = elseTok && this.statement(elseTok.i);
+    if (ifFalse !== undefined) {
+      return {
+        v: {
+          kind: 'SelectStat',
+          ifTok: ifTok!.v,
+          cond: cond!.v,
+          ifTrue: ifTrue.v,
+          elseTok: elseTok!.v,
+          ifFalse: ifFalse.v
+        },
+        i: ifFalse.i
+      };
+    }
+    return {
+      v: {kind: 'SelectStat', ifTok: ifTok!.v, cond: cond!.v, ifTrue: ifTrue.v},
+      i: ifTrue.i
+    };
+  }
+
+  private exit(i: number): Result<ExitStat> {
+    const exit = this.tok(i, TokenKind.KEYWORD_EXIT);
+    if (exit === undefined) {
+      return undefined;
+    }
+    const expr = this.assign(exit.i);
+    return {
+      v: {kind: 'ExitStat', exit: exit.v, expr: expr?.v},
+      i: expr?.i ?? exit.i
+    };
+  }
+
+  private raise(i: number): Result<RaiseStat> {
+    const raise = this.tok(i, TokenKind.KEYWORD_RAISE);
+    const expr = raise && this.assign(raise.i);
+    if (expr === undefined) {
+      return undefined;
+    }
+    return {v: {kind: 'RaiseStat', raise: raise!.v, expr: expr.v}, i: expr.i};
+  }
+
+  private tryStat(i: number): Result<TryStat> {
+    const tryTok = this.tok(i, TokenKind.KEYWORD_TRY);
+    const stat = tryTok && this.statement(tryTok.i);
+    const catchTok = stat && this.tok(stat.i, TokenKind.KEYWORD_CATCH);
+    if (catchTok === undefined) {
+      return undefined;
+    }
+    let catchAssign: Result<AssignLhsExpr>;
+    const lparen = this.tok(catchTok.i, TokenKind.SYMBOL_LPAREN);
+    const inner = lparen && this.assignLhs(lparen.i);
+    const rparen = inner && this.tok(inner.i, TokenKind.SYMBOL_RPAREN);
+    if (rparen !== undefined) {
+      catchAssign = {v: inner!.v, i: rparen.i};
     } else {
-      rhs = (body as [Token, AssignExpr])[1];
-      arrow = (body as [Token, AssignExpr])[0];
+      catchAssign = this.assignLhs(catchTok.i);
     }
-    if (paramsExpr === undefined) {
-      return {
-        kind: 'AnonExpr',
-        lparen: lparen,
-        rparen: rparen,
-        params: [],
-        isNamed: true,
-        asyncTok: asyncTok,
-        arrow: arrow,
-        expr: rhs
-      };
-    } else if (paramsExpr.length == 3 && paramsExpr[1] instanceof Array) {
-      const [_, params, __] = paramsExpr;
-      return {
-        kind: 'AnonExpr',
-        lparen: lparen,
-        rparen: rparen,
-        params: params,
-        isNamed: true,
-        asyncTok: asyncTok,
-        arrow: arrow,
-        expr: rhs
-      };
+    const catchStat = catchAssign && this.statement(catchAssign.i);
+    if (catchStat === undefined) {
+      return undefined;
     }
     return {
-      kind: 'AnonExpr',
-      lparen: lparen,
-      rparen: rparen,
-      params: paramsExpr as ParamExpr[],
-      isNamed: false,
-      asyncTok: asyncTok,
-      arrow: arrow,
-      expr: rhs
+      v: {
+        kind: 'TryStat',
+        tryTok: tryTok!.v,
+        stat: stat!.v,
+        catchTok: catchTok.v,
+        catchAssign: catchAssign!.v,
+        catchStat: catchStat.v
+      },
+      i: catchStat.i
     };
   }
-}
 
-function applyField(expr: [Token, IdentifierExpr[]]): FieldStat {
-  const [fieldTok, fields] = expr;
-  return {kind: 'FieldStat', fieldTok: fieldTok, fields: fields};
-}
-
-function applyStatic(expr: [Token, IdentifierExpr, Token, ConditionExpr]):
-    StaticStat {
-  const [staticTok, name, eq, condExpr] = expr;
-  return {
-    kind: 'StaticStat',
-    staticTok: staticTok,
-    name: name,
-    eq: eq,
-    expr: condExpr
-  };
-}
-
-function applyClass(expr: [
-  AnnotationExpr[]|undefined, Token, IdentifierExpr,
-  [Token, PostfixExpr]|undefined,
-  [Token, ClassMemberStat[], Token]|ClassMemberStat
-]): ClassStat {
-  const [annots, classTok, name, superExpr, body] = expr;
-  let colon, superClass;
-  if (superExpr === undefined) {
-    colon = undefined;
-    superClass = undefined;
-  } else {
-    colon = superExpr[0];
-    superClass = superExpr[1];
+  private jump(i: number): Result<JumpStat> {
+    i = this.lines(i);
+    const ret = this.tok(i, TokenKind.KEYWORD_RETURN);
+    if (ret !== undefined) {
+      const expr = this.tuple(ret.i);
+      if (expr !== undefined) {
+        return {
+          v: {kind: 'JumpStat', token: ret.v, expr: expr.v},
+          i: this.lines(expr.i)
+        };
+      }
+      return {v: {kind: 'JumpStat', token: ret.v}, i: this.lines(ret.i)};
+    }
+    const jump =
+        this.tokIn(i, [TokenKind.KEYWORD_BREAK, TokenKind.KEYWORD_CONTINUE]);
+    return jump &&
+        {v: {kind: 'JumpStat', token: jump.v}, i: this.lines(jump.i)};
   }
-  if ('kind' in body) {
+
+  statement(i: number): Result<Statement> {
+    return this.cached<Statement>('statement', i, () => {
+      const j = this.lines(i);
+      const r: Result<Statement> = this.exit(j) ?? this.raise(j) ??
+          this.tryStat(j) ?? this.select(j) ?? this.compound(j) ??
+          this.iter(j) ?? this.jump(j) ?? this.expression(j);
+      return r && {v: r.v, i: this.lines(r.i)};
+    });
+  }
+
+  // Functions and classes
+
+  private param(i: number): Result<ParamExpr> {
+    const j = this.lines(i);
+    const field = this.tok(j, TokenKind.KEYWORD_FIELD);
+    const name = this.identifier(field?.i ?? j);
+    if (name === undefined) {
+      return undefined;
+    }
+    const eq = this.tok(name.i, TokenKind.SYMBOL_EQUALS);
+    const defaultValue = eq && this.condition(eq.i);
+    if (defaultValue !== undefined) {
+      return {
+        v: {
+          kind: 'ParamExpr',
+          field: field?.v,
+          name: name.v,
+          eq: eq!.v,
+          defaultValue: defaultValue.v
+        },
+        i: this.lines(defaultValue.i)
+      };
+    }
     return {
-      kind: 'ClassStat',
-      classTok: classTok,
-      name: name,
-      colon: colon,
-      super: superClass,
-      stats: [body],
-      annots: annots ?? [] };
+      v: {kind: 'ParamExpr', name: name.v, field: field?.v},
+      i: this.lines(name.i)
+    };
   }
-  const [lbrace, stats, rbrace] = body;
-  return {
-    kind: 'ClassStat',
-    classTok: classTok,
-    name: name,
-    colon: colon,
-    super: superClass,
-    lbrace: lbrace,
-    rbrace: rbrace,
-    stats: stats,
-    annots: annots ?? [] };
+
+  // Parses the parameters between parentheses: `{a, b}` (named), `a, b` or
+  // nothing.
+  private params(i: number): Match<{params: ParamExpr[], isNamed: boolean}> {
+    const lbrace = this.tok(i, TokenKind.SYMBOL_LBRACE);
+    const named =
+        lbrace && this.list(lbrace.i, j => this.param(j), TokenKind.SYMBOL_COMMA);
+    const rbrace = named && this.tok(named.i, TokenKind.SYMBOL_RBRACE);
+    if (rbrace !== undefined) {
+      return {v: {params: named!.v, isNamed: true}, i: rbrace.i};
+    }
+    const positional = this.list(i, j => this.param(j), TokenKind.SYMBOL_COMMA);
+    if (positional !== undefined) {
+      return {v: {params: positional.v, isNamed: false}, i: positional.i};
+    }
+    // As before, a function with no parameters counts as named.
+    return {v: {params: [], isNamed: true}, i: i};
+  }
+
+  private annotation(i: number): Result<AnnotationExpr> {
+    const at = this.tok(this.lines(i), TokenKind.SYMBOL_AT);
+    const firstPart = at && this.identifier(at.i);
+    if (firstPart === undefined) {
+      return undefined;
+    }
+    let j = firstPart.i;
+    const period = this.tok(j, TokenKind.SYMBOL_PERIOD);
+    const secondPart = period && this.identifier(period.i);
+    if (secondPart !== undefined) {
+      j = secondPart.i;
+    }
+    const lparen = this.tok(j, TokenKind.SYMBOL_LPAREN);
+    const args = lparen && this.args(lparen.i);
+    const rparen = args && this.tok(args.i, TokenKind.SYMBOL_RPAREN);
+    if (rparen === undefined) {
+      return {
+        v: {
+          kind: 'AnnotationExpr',
+          at: at!.v,
+          firstPart: firstPart.v,
+          secondPart: secondPart?.v,
+        },
+        i: this.lines(j)
+      };
+    }
+    return {
+      v: {
+        kind: 'AnnotationExpr',
+        at: at!.v,
+        firstPart: firstPart.v,
+        secondPart: secondPart?.v,
+        args: args!.v,
+        lparen: lparen!.v,
+        rparen: rparen.v
+      },
+      i: this.lines(rparen.i)
+    };
+  }
+
+  private annotations(i: number): Match<AnnotationExpr[]> {
+    const annots: AnnotationExpr[] = [];
+    while (true) {
+      const annot = this.annotation(i);
+      if (annot === undefined) {
+        return {v: annots, i: i};
+      }
+      annots.push(annot.v);
+      i = annot.i;
+    }
+  }
+
+  private functionStat(i: number): Result<FunctionStat> {
+    const annots = this.annotations(i);
+    const defTok = this.tok(annots.i, TokenKind.KEYWORD_FUNCTION);
+    const name = defTok && this.identifier(defTok.i);
+    const lparen = name && this.tok(name.i, TokenKind.SYMBOL_LPAREN);
+    if (lparen === undefined) {
+      return undefined;
+    }
+    const params = this.params(lparen.i);
+    const rparen = this.tok(params.i, TokenKind.SYMBOL_RPAREN);
+    if (rparen === undefined) {
+      return undefined;
+    }
+    const asyncTok = this.tok(rparen.i, TokenKind.KEYWORD_ASYNC);
+    const stat = this.statement(asyncTok?.i ?? rparen.i);
+    if (stat === undefined) {
+      return undefined;
+    }
+    return {
+      v: {
+        kind: 'FunctionStat',
+        defTok: defTok!.v,
+        name: name!.v,
+        lparen: lparen.v,
+        rparen: rparen.v,
+        params: params.v.params,
+        isNamed: params.v.isNamed,
+        asyncTok: asyncTok?.v,
+        stat: stat.v,
+        annots: annots.v
+      },
+      i: stat.i
+    };
+  }
+
+  private method(i: number): Result<MethodStat> {
+    const annots = this.annotations(i);
+    let methodTok: Token|undefined;
+    let name: IdentifierExpr|NewExpr|SpecialMethodIdentifierExpr;
+    let j: number;
+    const methodKw = this.tok(annots.i, TokenKind.KEYWORD_METHOD);
+    const methodName = methodKw &&
+        (this.identifier(methodKw.i) ?? this.specialMethodIdentifier(methodKw.i));
+    if (methodName !== undefined) {
+      methodTok = methodKw!.v;
+      name = methodName.v;
+      j = methodName.i;
+    } else {
+      const newTok = this.newExpr(annots.i);
+      if (newTok === undefined) {
+        return undefined;
+      }
+      name = newTok.v;
+      j = newTok.i;
+    }
+    const lparen = this.tok(j, TokenKind.SYMBOL_LPAREN);
+    if (lparen === undefined) {
+      return undefined;
+    }
+    const params = this.params(lparen.i);
+    const rparen = this.tok(params.i, TokenKind.SYMBOL_RPAREN);
+    if (rparen === undefined) {
+      return undefined;
+    }
+    const asyncTok = this.tok(rparen.i, TokenKind.KEYWORD_ASYNC);
+    const stat = this.statement(asyncTok?.i ?? rparen.i);
+    if (stat === undefined) {
+      return undefined;
+    }
+    return {
+      v: {
+        kind: 'MethodStat',
+        methodTok: methodTok,
+        name: name,
+        lparen: lparen.v,
+        rparen: rparen.v,
+        params: params.v.params,
+        isNamed: params.v.isNamed,
+        asyncTok: asyncTok?.v,
+        stat: stat.v,
+        annots: annots.v
+      },
+      i: stat.i
+    };
+  }
+
+  private specialMethodIdentifier(i: number): Result<SpecialMethodIdentifierExpr> {
+    const t = this.tokIn(i, [
+      TokenKind.SYMBOL_EQUIV, TokenKind.SYMBOL_NEQUIV, TokenKind.SYMBOL_ARRAY_SET,
+      TokenKind.SYMBOL_ARRAY_ACCESS
+    ]);
+    return t && {v: {kind: 'SpecialMethodIdentifierExpr', token: t.v}, i: t.i};
+  }
+
+  private anon(i: number): Result<AnonExpr> {
+    return this.cached<AnonExpr>('anon', i, () => {
+      // x -> ...
+      const param = this.identifier(i);
+      if (param !== undefined) {
+        const asyncTok = this.tok(param.i, TokenKind.KEYWORD_ASYNC);
+        const arrow = this.tok(asyncTok?.i ?? param.i, TokenKind.SYMBOL_RARROW);
+        const body = arrow && this.assign(arrow.i);
+        if (body !== undefined) {
+          return {
+            v: {
+              kind: 'AnonExpr',
+              params: [{kind: 'ParamExpr', name: param.v}],
+              asyncTok: asyncTok?.v,
+              isNamed: false,
+              arrow: arrow!.v,
+              expr: body.v
+            },
+            i: body.i
+          };
+        }
+      }
+      // (params) -> ... or (params) {...}
+      const lparen = this.tok(i, TokenKind.SYMBOL_LPAREN);
+      if (lparen === undefined) {
+        return undefined;
+      }
+      const params = this.params(lparen.i);
+      const rparen = this.tok(params.i, TokenKind.SYMBOL_RPAREN);
+      if (rparen === undefined) {
+        return undefined;
+      }
+      const asyncTok = this.tok(rparen.i, TokenKind.KEYWORD_ASYNC);
+      const j = asyncTok?.i ?? rparen.i;
+      const arrow = this.tok(j, TokenKind.SYMBOL_RARROW);
+      const arrowBody = arrow && this.assign(arrow.i);
+      let body: Result<AssignExpr|CompoundStat> = arrowBody;
+      if (body === undefined) {
+        body = this.compound(j);
+      }
+      if (body === undefined) {
+        return undefined;
+      }
+      return {
+        v: {
+          kind: 'AnonExpr',
+          lparen: lparen.v,
+          rparen: rparen.v,
+          params: params.v.params,
+          isNamed: params.v.isNamed,
+          asyncTok: asyncTok?.v,
+          arrow: arrowBody === undefined ? undefined : arrow!.v,
+          expr: body.v
+        },
+        i: body.i
+      };
+    });
+  }
+
+  private field(i: number): Result<FieldStat> {
+    const fieldTok = this.tok(i, TokenKind.KEYWORD_FIELD);
+    const fields = fieldTok &&
+        this.list(fieldTok.i, j => this.identifier(j), TokenKind.SYMBOL_COMMA);
+    if (fields === undefined) {
+      return undefined;
+    }
+    return {
+      v: {kind: 'FieldStat', fieldTok: fieldTok!.v, fields: fields.v},
+      i: fields.i
+    };
+  }
+
+  private staticStat(i: number): Result<StaticStat> {
+    const staticTok = this.tok(i, TokenKind.KEYWORD_STATIC);
+    const name = staticTok && this.identifier(staticTok.i);
+    const eq = name && this.tok(name.i, TokenKind.SYMBOL_EQUALS);
+    const expr = eq && this.condition(eq.i);
+    if (expr === undefined) {
+      return undefined;
+    }
+    return {
+      v: {
+        kind: 'StaticStat',
+        staticTok: staticTok!.v,
+        name: name!.v,
+        eq: eq!.v,
+        expr: expr.v
+      },
+      i: expr.i
+    };
+  }
+
+  private classMember(i: number): Result<ClassMemberStat> {
+    const j = this.lines(i);
+    const r: Result<ClassMemberStat> =
+        this.method(j) ?? this.field(j) ?? this.staticStat(j);
+    return r && {v: r.v, i: this.lines(r.i)};
+  }
+
+  private classStat(i: number): Result<ClassStat> {
+    const annots = this.annotations(i);
+    const classTok = this.tok(annots.i, TokenKind.KEYWORD_CLASS);
+    const name = classTok && this.identifier(classTok.i);
+    if (name === undefined) {
+      return undefined;
+    }
+    let j = name.i;
+    const colon = this.tok(j, TokenKind.SYMBOL_COLON);
+    const superClass = colon && this.postfix(colon.i);
+    if (superClass !== undefined) {
+      j = superClass.i;
+    }
+    const lbrace = this.tok(this.lines(j), TokenKind.SYMBOL_LBRACE);
+    if (lbrace !== undefined) {
+      const body = this.items(
+          this.lines(lbrace.i), k => this.classMember(k), /*inBlock=*/ true);
+      const end = this.lines(body.i);
+      const rbrace: Result<Token> = this.tok(end, TokenKind.SYMBOL_RBRACE) ??
+          this.closedAt(this.closeUnclosedBlock(lbrace.v, end), end);
+      if (rbrace !== undefined) {
+        return {
+          v: {
+            kind: 'ClassStat',
+            classTok: classTok!.v,
+            name: name.v,
+            colon: superClass && colon!.v,
+            super: superClass?.v,
+            lbrace: lbrace.v,
+            rbrace: rbrace.v,
+            stats: body.v,
+            annots: annots.v
+          },
+          i: this.lines(rbrace.i)
+        };
+      }
+    }
+    // A class with a single member needs no braces.
+    const member = this.classMember(j);
+    if (member === undefined) {
+      return undefined;
+    }
+    return {
+      v: {
+        kind: 'ClassStat',
+        classTok: classTok!.v,
+        name: name.v,
+        colon: superClass && colon!.v,
+        super: superClass?.v,
+        stats: [member.v],
+        annots: annots.v
+      },
+      i: member.i
+    };
+  }
+
+  private importStat(i: number): Result<ImportStat> {
+    const importTok = this.tok(i, TokenKind.KEYWORD_IMPORT);
+    if (importTok === undefined) {
+      return undefined;
+    }
+    const source = this.identifier(importTok.i) ?? this.string(importTok.i);
+    if (source === undefined) {
+      return undefined;
+    }
+    const asTok = this.tok(source.i, TokenKind.KEYWORD_AS);
+    const name = asTok && this.identifier(asTok.i);
+    if (name !== undefined) {
+      return {
+        v: {
+          kind: 'ImportAsStat',
+          name: name.v,
+          source: source.v,
+          importTok: importTok.v,
+          asTok: asTok!.v
+        },
+        i: name.i
+      };
+    }
+    return {
+      v: {kind: 'ImportStat', source: source.v, importTok: importTok.v},
+      i: source.i
+    };
+  }
+
+  private moduleItem(i: number): Result<Statement> {
+    const j = this.lines(i);
+    const r: Result<Statement> = this.importStat(j) ?? this.classStat(j) ??
+        this.functionStat(j) ?? this.exit(j) ?? this.raise(j) ??
+        this.tryStat(j) ?? this.select(j) ?? this.compound(j) ??
+        this.iter(j) ?? this.expression(j);
+    return r && {v: r.v, i: this.lines(r.i)};
+  }
+
+  // Error recovery
+
+  // Parses [item] as many times as possible. In recovery mode, an item that
+  // fails to parse is reported and skipped, up to the end of the enclosing
+  // block if [inBlock].
+  private items<T>(i: number, item: (i: number) => Result<T>, inBlock: boolean):
+      Match<T[]> {
+    const values: T[] = [];
+    // When an item parses but tried to go further and failed beyond its end
+    // (e.g., `b` in `b = = 2`), that failure is the likely cause if the next
+    // item fails right where it ended.
+    let lookahead: {end: number, furthest: number, expected: Set<TokenKind>}|
+        undefined;
+    while (true) {
+      const start = this.lines(i);
+      if (start >= this.toks.length ||
+          (inBlock && this.toks[start].kind === TokenKind.SYMBOL_RBRACE) ||
+          (inBlock && this.recover && this.startsTopLevelItem(start))) {
+        return {v: values, i: start};
+      }
+      // Track the furthest failure within this item, for its error message,
+      // then merge it with the enclosing rule's.
+      const outerFurthest = this.furthest, outerExpected = this.expected;
+      this.furthest = -1;
+      this.expected = new Set();
+      const r = item(start);
+      const itemFurthest = this.furthest, itemExpected = this.expected;
+      const mergeFurthest = () => {
+        if (outerFurthest > itemFurthest) {
+          this.furthest = outerFurthest;
+          this.expected = outerExpected;
+        } else if (outerFurthest === itemFurthest) {
+          this.expected = new Set([...outerExpected, ...itemExpected]);
+        }
+      };
+      if (r !== undefined && r.i > start) {
+        lookahead = itemFurthest > r.i ?
+            {end: r.i, furthest: itemFurthest, expected: itemExpected} :
+            undefined;
+        mergeFurthest();
+        values.push(r.v);
+        i = r.i;
+        continue;
+      }
+      if (!this.recover) {
+        mergeFurthest();
+        return {v: values, i: start};
+      }
+      let errorAt = itemFurthest;
+      if (lookahead !== undefined && this.lines(lookahead.end) === start &&
+          lookahead.furthest > itemFurthest) {
+        this.furthest = errorAt = lookahead.furthest;
+        this.expected = lookahead.expected;
+      }
+      lookahead = undefined;
+      this.report();
+      mergeFurthest();
+      i = this.skip(start, Math.max(errorAt, start), inBlock);
+      if (i >= this.toks.length && inBlock) {
+        return {v: values, i: i};
+      }
+    }
+  }
+
+  // Whether the token at [i] starts an unindented class, function, import or
+  // annotation, which in recovery mode ends a block whose '}' is missing.
+  private startsTopLevelItem(i: number): boolean {
+    const t = this.toks[i];
+    return t.pos.columnBegin === 1 &&
+        (t.kind === TokenKind.KEYWORD_CLASS ||
+         t.kind === TokenKind.KEYWORD_FUNCTION ||
+         t.kind === TokenKind.KEYWORD_IMPORT || t.kind === TokenKind.SYMBOL_AT);
+  }
+
+  // In recovery mode, closes a block at [i] whose '}' is missing, reporting it.
+  // Returns the token to use as the block's end, or undefined if the block
+  // can't be closed here.
+  private closeUnclosedBlock(lbrace: Token, i: number): Token|undefined {
+    if (!this.recover ||
+        (i < this.toks.length && !this.startsTopLevelItem(i))) {
+      return undefined;
+    }
+    this.problems.push({
+      message: '\'{\' is never closed; expected \'}\'.',
+      row: lbrace.pos.rowBegin - 1,
+      col: lbrace.pos.columnBegin - 1,
+    });
+    let last = i - 1;
+    while (last > 0 && this.toks[last].kind === TokenKind.NEWLINE) {
+      last--;
+    }
+    return this.toks[last] ?? lbrace;
+  }
+
+  private closedAt(last: Token|undefined, i: number): Result<Token> {
+    return last && {v: last, i: i};
+  }
+
+  private report(): void {
+    const t = this.toks[this.furthest];
+    const expected = [...this.expected].map(describeKind);
+    const found = t === undefined ? 'end of file' :
+        t.kind === TokenKind.NEWLINE ? 'end of line' :
+                                       `'${t.text}'`;
+    if (t?.kind === TokenKind.UNKNOWN) {
+      this.problems.push({
+        message: t.text === '\'' ? 'Unterminated string.' :
+                                   `Unexpected character '${t.text}'.`,
+        row: t.pos.rowBegin - 1,
+        col: t.pos.columnBegin - 1,
+      });
+      return;
+    }
+    let message = `Unexpected ${found}`;
+    if (expected.length > 4 && this.expected.has(TokenKind.IDENTIFIER)) {
+      message += '; expected an expression';
+    } else if (expected.length > 0 && expected.length <= 4) {
+      message += `; expected ${
+          expected.length === 1 ?
+              expected[0] :
+              expected.slice(0, -1).join(', ') + ' or ' +
+                  expected[expected.length - 1]}`;
+    }
+    message += '.';
+    this.problems.push(
+        t === undefined ? {message: message} : {
+          message: message,
+          row: t.pos.rowBegin - 1,
+          col: t.pos.columnBegin - 1,
+        });
+  }
+
+  // Returns the index to resume parsing at after a syntax error at [errorAt] in
+  // an item that starts at [start]: the start of the next line after the error
+  // that isn't inside brackets, or the closing brace of the enclosing block.
+  private skip(start: number, errorAt: number, inBlock: boolean): number {
+    let depth = 0;
+    let k = start;
+    while (k < this.toks.length) {
+      const t = this.toks[k];
+      if (OPENERS.has(t.kind)) {
+        depth++;
+      } else if (CLOSERS.has(t.kind)) {
+        if (depth === 0 && inBlock && t.kind === TokenKind.SYMBOL_RBRACE &&
+            k > start) {
+          return k;
+        }
+        depth = Math.max(0, depth - 1);
+      } else if (
+          t.kind === TokenKind.NEWLINE && depth === 0 && k >= errorAt) {
+        return k + 1;
+      }
+      k++;
+    }
+    return k;
+  }
+
+  parseModule(): Result<Module> {
+    const body = this.items(0, i => this.moduleItem(i), /*inBlock=*/ false);
+    if (body.i < this.toks.length) {
+      return undefined;
+    }
+    return {v: {statements: body.v}, i: body.i};
+  }
+
+  reportFailure(): void {
+    this.report();
+  }
 }
 
-function applyImportStat(expr: [Token, IdentifierExpr|StringExpr]): ImportStat {
-  const [importTok, name] = expr;
-  return {kind: 'ImportStat', source: name, importTok: importTok};
-}
-
-function applyImportAsStat(value: [
-  Token, IdentifierExpr|StringExpr, Token, IdentifierExpr
-]): ImportStat {
-  const [importTok, source, asTok, name] = value;
+// Parses a Zinnia module. If it has syntax errors, the module holds the
+// statements that could be parsed, and the errors are returned as problems.
+export function parseModule(text: string): ParseResult {
+  const tokens = tokenize(text);
+  const strict = new Parser(tokens, /*recover=*/ false);
+  const strictModule = strict.parseModule();
+  if (strictModule !== undefined) {
+    return {module: strictModule.v, problems: []};
+  }
+  const recovering = new Parser(tokens, /*recover=*/ true);
+  const module = recovering.parseModule();
   return {
-    kind: 'ImportAsStat',
-    name: name,
-    source: source,
-    importTok: importTok,
-    asTok: asTok
+    module: module?.v ?? {statements: []},
+    problems: recovering.problems.length > 0 ?
+        recovering.problems :
+        [{message: 'Unable to parse the file.'}],
   };
 }
-
-function applyModule(value: Statement[]): Module {
-  return {statements: value};
-}
-
-// Expressions
-
-export const EXPRESSION = memoRule<TokenKind, Expression>();
-export const LINES = memoRule<TokenKind, Token[]|undefined>();
-
-// Literals and identifiers
-export const IDENTIFIER = memoRule<TokenKind, IdentifierExpr>();
-export const NEW = memoRule<TokenKind, NewExpr>();
-export const CONSTANT = memoRule<TokenKind, ConstantExpr>();
-export const STRING = memoRule<TokenKind, StringExpr>();
-
-// Structures
-export const ARRAY = memoRule<TokenKind, ArrayExpr>();
-export const MAP_ENTRY = memoRule<TokenKind, MapEntryExpr>();
-export const MAP = memoRule<TokenKind, MapExpr>();
-export const TUPLE = memoRule<TokenKind, TupleExpr>();
-
-// Primary
-export const PRIMARY = memoRule<TokenKind, PrimaryExpr>();
-export const PRIMARY_NO_CONSTANTS = memoRule<TokenKind, PrimaryExpr>();
-export const PARENS = memoRule<TokenKind, ParensExpr>();
-export const LENGTH = memoRule<TokenKind, LengthExpr>();
-export const EMPTY_PARENS = memoRule<TokenKind, EmptyParensExpr>();
-
-// Postfix
-export const POSTFIX = memoRule<TokenKind, PostfixExpr>();
-export const NAMED_ARG = memoRule<TokenKind, NamedArgExpr>();
-export const FUNCTION_CALL = memoRule<TokenKind, FunctionCallExpr>();
-export const ARRAY_INDEX = memoRule<TokenKind, ArrayIndexExpr>();
-export const MEMBER_ACCESS = memoRule<TokenKind, MemberAccessExpr>();
-
-export const RANGE = memoRule<TokenKind, RangeExpr|PostfixExpr>();
-export const UNARY = memoRule<TokenKind, UnaryExpr>();
-export const BINARY_AND = memoRule<TokenKind, BinaryExpr>();
-export const BINARY_XOR = memoRule<TokenKind, BinaryExpr>();
-export const BINARY_OR = memoRule<TokenKind, BinaryExpr>();
-export const MULT = memoRule<TokenKind, MultExpr>();
-export const ADD = memoRule<TokenKind, AddExpr>();
-export const IN = memoRule<TokenKind, InExpr|AddExpr>();
-export const IS = memoRule<TokenKind, IsExpr|InExpr|AddExpr>();
-export const RELATION = memoRule<TokenKind, RelationExpr>();
-export const EQUAL = memoRule<TokenKind, EqualExpr>();
-export const AND = memoRule<TokenKind, AndExpr>();
-export const OR = memoRule<TokenKind, OrExpr>();
-export const CONDITION = memoRule<TokenKind, ConditionExpr>();
-
-// Assignment
-export const ASSIGN = memoRule<TokenKind, AssignExpr>();
-export const ASSIGN_TUPLE = memoRule<TokenKind, AssignTupleExpr>();
-export const ASSIGN_ARRAY = memoRule<TokenKind, AssignArrayExpr>();
-export const ASSIGN_LHS = memoRule<TokenKind, AssignLhsExpr>();
-
-// Statements
-
-export const STATEMENT = memoRule<TokenKind, Statement>();
-
-// Iterative
-export const FOREACH = memoRule<TokenKind, ForeachStat>();
-export const FOR = memoRule<TokenKind, ForStat>();
-export const WHILE = memoRule<TokenKind, WhileStat>();
-export const ITER = memoRule<TokenKind, IterStat>();
-
-export const COMPOUND = memoRule<TokenKind, CompoundStat>();
-export const SELECT = memoRule<TokenKind, SelectStat>();
-export const EXIT = memoRule<TokenKind, ExitStat>();
-export const RAISE = memoRule<TokenKind, RaiseStat>();
-export const TRY = memoRule<TokenKind, TryStat>();
-export const JUMP = memoRule<TokenKind, JumpStat>();
-
-export const SPECIAL_METHOD_IDENTIFIER =
-    memoRule<TokenKind, SpecialMethodIdentifierExpr>();
-export const FUNCTION = memoRule<TokenKind, FunctionStat>();
-export const PARAM = memoRule<TokenKind, ParamExpr>();
-export const ANON = memoRule<TokenKind, AnonExpr>();
-export const ANNOTATION = memoRule<TokenKind, AnnotationExpr>();
-
-export const CLASS = memoRule<TokenKind, ClassStat>();
-export const METHOD = memoRule<TokenKind, MethodStat>();
-export const FIELD = memoRule<TokenKind, FieldStat>();
-export const STATIC = memoRule<TokenKind, StaticStat>();
-
-export const IMPORT = memoRule<TokenKind, ImportStat>();
-
-export const MODULE = memoRule<TokenKind, Module>();
-
-LINES.setPattern(rep_sc(tok(TokenKind.NEWLINE)));
-
-IDENTIFIER.setPattern(apply(
-    alt_sc(
-        tok(TokenKind.IDENTIFIER), tok(TokenKind.KEYWORD_CLASS),
-        tok(TokenKind.KEYWORD_MODULE), tok(TokenKind.KEYWORD_ASYNC),
-        tok(TokenKind.KEYWORD_THEN), tok(TokenKind.KEYWORD_FUNCTION)),
-    applyIdentifier));
-
-NEW.setPattern(apply(tok(TokenKind.KEYWORD_NEW), applyNew));
-
-CONSTANT.setPattern(alt_sc(
-    apply(
-        alt_sc(
-            tok(TokenKind.KEYWORD_TRUE),
-            tok(TokenKind.KEYWORD_FALSE),
-            ),
-        applyBool),
-    apply(
-        tok(TokenKind.KEYWORD_NULL),
-        applyNone,
-        ),
-    apply(
-        seq(opt_sc(tok(TokenKind.SYMBOL_MINUS)), tok(TokenKind.LITEARL_FLOAT)),
-        applyFloat),
-    apply(
-        seq(opt_sc(tok(TokenKind.SYMBOL_MINUS)),
-            tok(TokenKind.LITEARL_INTEGER)),
-        applyInt)));
-
-STRING.setPattern(apply(tok(TokenKind.LITERAL_STRING), applyString));
-
-ARRAY.setPattern(apply(
-    alt_sc(
-        tok(TokenKind.SYMBOL_ARRAY_ACCESS),
-        kmid(
-            tok(TokenKind.SYMBOL_LBRACKET), opt_sc(TUPLE),
-            tok(TokenKind.SYMBOL_RBRACKET))),
-    applyArray));
-
-MAP_ENTRY.setPattern(apply(
-    kmid(LINES, seq(POSTFIX, tok(TokenKind.SYMBOL_COLON), POSTFIX), LINES),
-    applyMapEntry));
-
-MAP.setPattern(apply(
-    kmid(
-        seq(LINES, tok(TokenKind.SYMBOL_LBRACE), LINES),
-        opt_sc(list_sc(MAP_ENTRY, tok(TokenKind.SYMBOL_COMMA))),
-        seq(LINES, tok(TokenKind.SYMBOL_RBRACE), LINES)),
-    applyMap));
-
-PARENS.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_LPAREN), TUPLE, tok(TokenKind.SYMBOL_RPAREN)),
-    applyParens));
-
-LENGTH.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_PIPE), TUPLE, tok(TokenKind.SYMBOL_PIPE)),
-    applyLength));
-
-PRIMARY.setPattern(alt_sc(
-    ANON, IDENTIFIER, NEW, CONSTANT, STRING, ARRAY, MAP, PARENS, LENGTH));
-
-PRIMARY_NO_CONSTANTS.setPattern(
-    alt_sc(ANON, IDENTIFIER, STRING, ARRAY, MAP, PARENS, LENGTH));
-
-EMPTY_PARENS.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_LPAREN), tok(TokenKind.SYMBOL_RPAREN)),
-    applyEmptyParens));
-
-NAMED_ARG.setPattern(apply(
-    seq(
-        kmid(LINES, IDENTIFIER, LINES),
-        tok(TokenKind.SYMBOL_COLON),
-        kmid(LINES, CONDITION, LINES),
-        ),
-    applyNamedArg));
-
-FUNCTION_CALL.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_LPAREN),
-        alt_sc(list_sc(NAMED_ARG, tok(TokenKind.SYMBOL_COMMA)), TUPLE),
-        tok(TokenKind.SYMBOL_RPAREN)),
-    applyFunctionCall));
-
-ARRAY_INDEX.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_LBRACKET), TUPLE, tok(TokenKind.SYMBOL_RBRACKET)),
-    applyArrayIndex));
-
-MEMBER_ACCESS.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_PERIOD), alt_sc(IDENTIFIER, NEW)),
-    applyMemberAccess));
-
-
-POSTFIX.setPattern(apply(
-    alt_sc(
-        seq(PRIMARY_NO_CONSTANTS,
-            kleft(
-                rep_sc(alt_sc(
-                    ARRAY_INDEX, EMPTY_PARENS, FUNCTION_CALL,
-                    kright(LINES, MEMBER_ACCESS))),
-                LINES)),
-        PRIMARY),
-    applyPostfix));
-
-RANGE.setPattern(apply(
-    seq(POSTFIX, opt_sc(kright(tok(TokenKind.SYMBOL_COLON), POSTFIX)),
-        opt_sc(kright(tok(TokenKind.SYMBOL_COLON), POSTFIX))),
-    applyRange));
-
-UNARY.setPattern(apply(
-    seq(rep_sc(alt_sc(
-            tok(TokenKind.SYMBOL_TILDE),
-            tok(TokenKind.SYMBOL_EXCLAIM),
-            tok(TokenKind.SYMBOL_MINUS),
-            tok(TokenKind.KEYWORD_AWAIT),
-            )),
-        RANGE),
-    applyUnary));
-
-BINARY_AND.setPattern(apply(
-    seq(UNARY, rep_sc(seq(tok(TokenKind.SYMBOL_AMPER), UNARY))), applyBinary));
-
-BINARY_XOR.setPattern(apply(
-    seq(BINARY_AND, rep_sc(seq(tok(TokenKind.SYMBOL_CARET), BINARY_AND))),
-    applyBinary));
-
-BINARY_OR.setPattern(apply(
-    seq(BINARY_XOR, rep_sc(seq(tok(TokenKind.SYMBOL_PIPE), BINARY_XOR))),
-    applyBinary));
-
-MULT.setPattern(apply(
-    seq(BINARY_OR,
-        rep_sc(
-            seq(alt_sc(
-                    tok(TokenKind.SYMBOL_STAR), tok(TokenKind.SYMBOL_FSLASH),
-                    tok(TokenKind.SYMBOL_PERCENT)),
-                BINARY_OR))),
-    applyMult));
-
-ADD.setPattern(apply(
-    seq(MULT,
-        rep_sc(
-            seq(alt_sc(
-                    tok(TokenKind.SYMBOL_PLUS),
-                    tok(TokenKind.SYMBOL_MINUS),
-                    ),
-                MULT))),
-    applyAdd));
-
-IN.setPattern(apply(
-    seq(ADD,
-        opt_sc(seq(
-            alt_sc(tok(TokenKind.KEYWORD_IN), tok(TokenKind.KEYWORD_NOTIN)),
-            ADD))),
-    applyIn));
-
-IS.setPattern(apply(
-    seq(IN, opt_sc(seq(tok(TokenKind.KEYWORD_IS), IN))), applyIs));
-
-RELATION.setPattern(apply(
-    seq(IS,
-        rep_sc(seq(
-            alt_sc(
-                tok(TokenKind.SYMBOL_LTHAN), tok(TokenKind.SYMBOL_GTHAN),
-                tok(TokenKind.SYMBOL_LTHANEQ), tok(TokenKind.SYMBOL_GTHANEQ)),
-            IS))),
-    applyRelation));
-
-EQUAL.setPattern(apply(
-    seq(RELATION,
-        rep_sc(
-            seq(alt_sc(
-                    tok(TokenKind.SYMBOL_EQUIV),
-                    tok(TokenKind.SYMBOL_NEQUIV),
-                    ),
-                RELATION))),
-    applyEqual));
-
-AND.setPattern(apply(
-    seq(EQUAL, rep_sc(seq(tok(TokenKind.KEYWORD_AND), EQUAL))), applyAnd));
-
-OR.setPattern(
-    apply(seq(AND, rep_sc(seq(tok(TokenKind.KEYWORD_OR), AND))), applyOr));
-
-CONDITION.setPattern(apply(
-    alt_sc(
-        seq(tok(TokenKind.KEYWORD_IF), OR, opt_sc(tok(TokenKind.KEYWORD_THEN)),
-            CONDITION, tok(TokenKind.KEYWORD_ELSE), CONDITION),
-        seq(
-            tok(TokenKind.KEYWORD_IF),
-            OR,
-            opt_sc(tok(TokenKind.KEYWORD_THEN)),
-            CONDITION,
-            ),
-        OR),
-    applyCondition));
-
-ASSIGN_TUPLE.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_LPAREN),
-        list_sc(ASSIGN_LHS, tok(TokenKind.SYMBOL_COMMA)),
-        tok(TokenKind.SYMBOL_RPAREN)),
-    applyAssignTuple));
-
-ASSIGN_ARRAY.setPattern(apply(
-    seq(tok(TokenKind.SYMBOL_LBRACKET),
-        list_sc(ASSIGN_LHS, tok(TokenKind.SYMBOL_COMMA)),
-        tok(TokenKind.SYMBOL_RBRACKET)),
-    applyAssignArray));
-
-ASSIGN_LHS.setPattern(apply(
-    alt_sc(
-        apply(seq(tok(TokenKind.KEYWORD_CONST), IDENTIFIER),
-              applyConstIdentifier),
-        ASSIGN_TUPLE, ASSIGN_ARRAY, POSTFIX, IDENTIFIER),
-    applyAssignLhs));
-
-ASSIGN.setPattern(apply(
-    alt_sc(seq(ASSIGN_LHS, tok(TokenKind.SYMBOL_EQUALS), CONDITION), CONDITION),
-    applyAssign));
-
-TUPLE.setPattern(apply(
-    list_sc(kmid(LINES, ASSIGN, LINES), tok(TokenKind.SYMBOL_COMMA)),
-    applyTuple));
-
-EXPRESSION.setPattern(kleft(TUPLE, LINES));
-
-FOREACH.setPattern(apply(
-    alt_sc(
-        seq(tok(TokenKind.KEYWORD_FOR), tok(TokenKind.SYMBOL_LPAREN),
-            ASSIGN_LHS, tok(TokenKind.KEYWORD_IN), CONDITION,
-            tok(TokenKind.SYMBOL_RPAREN), STATEMENT),
-        seq(tok(TokenKind.KEYWORD_FOR), ASSIGN_LHS, tok(TokenKind.KEYWORD_IN),
-            CONDITION, STATEMENT),
-        ),
-    applyForeach));
-
-FOR.setPattern(apply(
-    alt_sc(
-        seq(tok(TokenKind.KEYWORD_FOR), tok(TokenKind.SYMBOL_LPAREN), ASSIGN,
-            tok(TokenKind.SYMBOL_COMMA), CONDITION, tok(TokenKind.SYMBOL_COMMA),
-            ASSIGN, tok(TokenKind.SYMBOL_RPAREN), STATEMENT),
-        seq(tok(TokenKind.KEYWORD_FOR), ASSIGN, tok(TokenKind.SYMBOL_COMMA),
-            CONDITION, tok(TokenKind.SYMBOL_COMMA), ASSIGN, STATEMENT),
-        ),
-    applyFor));
-
-WHILE.setPattern(apply(
-    alt_sc(
-        seq(tok(TokenKind.KEYWORD_WHILE), tok(TokenKind.SYMBOL_LPAREN),
-            CONDITION, tok(TokenKind.SYMBOL_RPAREN), STATEMENT),
-        seq(tok(TokenKind.KEYWORD_WHILE), CONDITION, STATEMENT),
-        ),
-    applyWhile));
-
-ITER.setPattern(alt_sc(FOREACH, FOR, WHILE));
-
-COMPOUND.setPattern(apply(
-    seq(kmid(LINES, tok(TokenKind.SYMBOL_LBRACE), LINES), rep_sc(STATEMENT),
-        kmid(LINES, tok(TokenKind.SYMBOL_RBRACE), LINES)),
-    applyCompound));
-
-SELECT.setPattern(apply(
-    seq(tok(TokenKind.KEYWORD_IF), TUPLE, STATEMENT,
-        opt_sc(seq(tok(TokenKind.KEYWORD_ELSE), STATEMENT))),
-    applySelect));
-
-EXIT.setPattern(
-    apply(seq(tok(TokenKind.KEYWORD_EXIT), opt_sc(ASSIGN)), applyExit));
-
-RAISE.setPattern(apply(seq(tok(TokenKind.KEYWORD_RAISE), ASSIGN), applyRaise));
-
-TRY.setPattern(apply(
-    seq(tok(TokenKind.KEYWORD_TRY), STATEMENT, tok(TokenKind.KEYWORD_CATCH),
-        alt_sc(
-            kmid(
-                tok(TokenKind.SYMBOL_LPAREN), ASSIGN_LHS,
-                tok(TokenKind.SYMBOL_RPAREN)),
-            ASSIGN_LHS),
-        STATEMENT),
-    applyTry));
-
-JUMP.setPattern(apply(
-    kmid(
-        LINES,
-        alt_sc(
-            seq(tok(TokenKind.KEYWORD_RETURN), TUPLE),
-            tok(TokenKind.KEYWORD_RETURN), tok(TokenKind.KEYWORD_BREAK),
-            tok(TokenKind.KEYWORD_CONTINUE)),
-        LINES),
-    applyJump));
-
-PARAM.setPattern(apply(
-    kmid(
-        LINES,
-        seq(opt_sc(tok(TokenKind.KEYWORD_FIELD)), IDENTIFIER,
-            opt_sc(seq(tok(TokenKind.SYMBOL_EQUALS), CONDITION))),
-        LINES),
-    applyParam));
-
-ANNOTATION.setPattern(apply(
-    kmid(
-        LINES,
-        seq(tok(TokenKind.SYMBOL_AT), IDENTIFIER,
-            opt_sc(kright(tok(TokenKind.SYMBOL_PERIOD), IDENTIFIER)),
-            opt_sc(seq(
-                tok(TokenKind.SYMBOL_LPAREN),
-                alt_sc(list_sc(NAMED_ARG, tok(TokenKind.SYMBOL_COMMA)), TUPLE),
-                tok(TokenKind.SYMBOL_RPAREN)))),
-        LINES),
-    applyAnnotation));
-
-FUNCTION.setPattern(apply(
-    seq(opt_sc(rep_sc(ANNOTATION)),
-        tok(TokenKind.KEYWORD_FUNCTION),
-        IDENTIFIER, tok(TokenKind.SYMBOL_LPAREN),
-        alt_sc(
-            seq(tok(TokenKind.SYMBOL_LBRACE),
-                list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
-                tok(TokenKind.SYMBOL_RBRACE)),
-            list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)), nil()),
-        tok(TokenKind.SYMBOL_RPAREN), opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
-        STATEMENT),
-    applyFunction));
-
-SPECIAL_METHOD_IDENTIFIER.setPattern(apply(
-    alt_sc(
-        tok(TokenKind.SYMBOL_EQUIV), tok(TokenKind.SYMBOL_NEQUIV),
-        tok(TokenKind.SYMBOL_ARRAY_SET), tok(TokenKind.SYMBOL_ARRAY_ACCESS)),
-    applySpecialMethodIdentifier));
-
-METHOD.setPattern(apply(
-    seq(opt_sc(rep_sc(ANNOTATION)),
-        alt_sc(
-            seq(tok(TokenKind.KEYWORD_METHOD),
-                alt_sc(IDENTIFIER, SPECIAL_METHOD_IDENTIFIER)),
-            NEW),
-        tok(TokenKind.SYMBOL_LPAREN),
-        alt_sc(
-            seq(tok(TokenKind.SYMBOL_LBRACE),
-                list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
-                tok(TokenKind.SYMBOL_RBRACE)),
-            list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)), nil()),
-        tok(TokenKind.SYMBOL_RPAREN), opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
-        STATEMENT),
-    applyMethod));
-
-ANON.setPattern(apply(
-    alt_sc(
-        seq(IDENTIFIER, opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
-            tok(TokenKind.SYMBOL_RARROW), ASSIGN),
-        seq(
-            tok(TokenKind.SYMBOL_LPAREN),
-            alt_sc(
-                seq(tok(TokenKind.SYMBOL_LBRACE),
-                    list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)),
-                    tok(TokenKind.SYMBOL_RBRACE)),
-                list_sc(PARAM, tok(TokenKind.SYMBOL_COMMA)), nil()),
-            tok(TokenKind.SYMBOL_RPAREN),
-            opt_sc(tok(TokenKind.KEYWORD_ASYNC)),
-            alt_sc(seq(tok(TokenKind.SYMBOL_RARROW), ASSIGN), COMPOUND),
-            ),
-        ),
-    applyAnon));
-
-FIELD.setPattern(apply(
-    seq(tok(TokenKind.KEYWORD_FIELD),
-        list_sc(IDENTIFIER, tok(TokenKind.SYMBOL_COMMA))),
-    applyField));
-
-STATIC.setPattern(apply(
-    seq(tok(TokenKind.KEYWORD_STATIC), IDENTIFIER, tok(TokenKind.SYMBOL_EQUALS),
-        CONDITION),
-    applyStatic));
-
-CLASS.setPattern(apply(
-    seq(opt_sc(rep_sc(ANNOTATION)), tok(TokenKind.KEYWORD_CLASS), IDENTIFIER,
-        opt_sc(seq(tok(TokenKind.SYMBOL_COLON), POSTFIX)),
-        alt_sc(
-            seq(
-                kmid(LINES, tok(TokenKind.SYMBOL_LBRACE), LINES),
-                rep_sc(kmid(LINES, alt_sc(METHOD, FIELD, STATIC), LINES)),
-                kmid(LINES, tok(TokenKind.SYMBOL_RBRACE), LINES),
-                ),
-            kmid(LINES, alt_sc(METHOD, FIELD, STATIC), LINES))),
-    applyClass));
-
-IMPORT.setPattern(alt_sc(
-    apply(
-        seq(tok(TokenKind.KEYWORD_IMPORT), alt_sc(IDENTIFIER, STRING),
-            tok(TokenKind.KEYWORD_AS), IDENTIFIER),
-        applyImportAsStat),
-    apply(
-        seq(tok(TokenKind.KEYWORD_IMPORT), alt_sc(IDENTIFIER, STRING)),
-        applyImportStat)));
-
-STATEMENT.setPattern(
-    kmid(
-        LINES,
-        alt_sc(EXIT, RAISE, TRY, SELECT, COMPOUND, ITER, JUMP, EXPRESSION),
-        LINES),
-);
-
-MODULE.setPattern(apply(
-    rep_sc(kmid(
-        LINES,
-        alt_sc(
-            IMPORT, CLASS, FUNCTION, EXIT, RAISE, TRY, SELECT, COMPOUND, ITER,
-            EXPRESSION),
-        LINES)),
-    applyModule));

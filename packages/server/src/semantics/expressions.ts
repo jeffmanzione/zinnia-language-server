@@ -1,8 +1,5 @@
-import * as parsec from 'typescript-parsec';
-import { TokenKind } from './tokenizer';
+import {Token, TokenKind} from './tokenizer';
 import { CompoundStat } from './statements';
-
-type Token = parsec.Token<TokenKind>;
 
 export interface IdentifierExpr {
 	kind: 'IdentifierExpr';
@@ -324,14 +321,12 @@ export type PostfixExpr =
 	| PrimaryExpr
 	| PostfixChainExpr;
 
-
 export function isPostfixExpr(expr: object): boolean {
 	if (isPrimaryExpr(expr)) {
 		return true;
 	}
 	return 'kind' in expr && expr.kind === 'PostfixChainExpr';
 }
-
 
 export type UnaryExpr =
 	| UnaryChainExpr
