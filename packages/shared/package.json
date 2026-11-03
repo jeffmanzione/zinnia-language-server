@@ -1,0 +1,23 @@
+{
+  "name": "zinnia-language-shared",
+  "version": "1.0.0",
+  "description": "",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": "*",
+    "vscode": "^1.127.0"
+  },
+  "scripts": {},
+  "dependencies": {
+    "vscode-languageclient": "^10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/vscode": "^1.125.0"
+  },
+  "exports": {
+    "./*": "./out/*.js"
+  }
+}

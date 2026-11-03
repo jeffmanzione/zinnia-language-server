@@ -1,0 +1,25 @@
+{
+	"name": "zinnia-language-server",
+	"description": "Zinnia language server node.",
+	"version": "1.0.0",
+	"author": "Jeff Manzione",
+	"publisher": "jeffmanzione",
+	"license": "MIT",
+	"engines": {
+		"node": "*"
+	},
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/jeffmanzione/zinnia-language-server"
+	},
+	"dependencies": {
+		"typescript-parsec": "^0.3.4",
+		"vscode-languageserver": "^10.1.0",
+		"vscode-languageserver-textdocument": "^1.0.12",
+		"vscode-uri": "^3.1.0"
+	},
+	"scripts": {},
+	"devDependencies": {
+		"@types/node": "^26.1.0"
+	}
+}

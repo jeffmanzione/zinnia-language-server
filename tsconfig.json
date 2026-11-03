@@ -1,0 +1,22 @@
+{
+	"compilerOptions": {
+		"module": "commonjs",
+		"target": "esnext",
+		"lib": ["ESNext"],
+		"types": ["node"],
+		"outDir": "out",
+		"rootDir": "src",
+		"sourceMap": true
+	},
+	"include": [
+		"packages"
+	],
+	"exclude": [
+		"node_modules"
+	],
+	"references": [
+		{ "path": "./packages/shared" },
+		{ "path": "./packages/client" },
+		{ "path": "./packages/server" }
+	]
+}

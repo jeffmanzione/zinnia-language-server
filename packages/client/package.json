@@ -1,0 +1,24 @@
+{
+	"name": "zinnia-language-client",
+	"description": "VSCode part of the Zinnia language server",
+	"author": "Jeff Manzione",
+	"license": "MIT",
+	"version": "0.0.1",
+	"publisher": "jeffmanzione",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/jeffmanzione/zinnia-language-server"
+	},
+	"engines": {
+		"vscode": "^1.127.0"
+	},
+  "scripts": {},
+	"dependencies": {
+		"typescript-parsec": "^0.3.4",
+		"vscode-languageclient": "^10.1.0"
+	},
+	"devDependencies": {
+		"@types/node": "^26.1.0",
+		"@types/vscode": "^1.125.0"
+	}
+}

@@ -1,13 +1,20 @@
-# jeff-vm-language-server README
+# Zinnia Language LSP
 
-Language support for Jeff's VM Language Server.
+Zinnia Language (.zn) language extension
 
-## Features
+## Functionality
 
-Adds syntax highlighting for [Jeff's VM Language](https://github.com/jeffreymanzione/jeff-vm).
+Syntax highlighting only.
 
-## Release Notes
+## Structure
 
-### 1.0.0
-
-Initial release of [jeff-vm-language-server](https://github.com/jeffreymanzione/jeff-vm-language-server).
+```
+.
+├── client // Language Client
+│   ├── src
+│   │   └── extension.ts // Language Client entry point
+├── package.json // The extension manifest.
+└── server // Language Server
+    └── src
+        └── server.ts // Language Server entry point
+```

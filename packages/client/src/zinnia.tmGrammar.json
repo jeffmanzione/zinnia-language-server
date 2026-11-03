@@ -1,0 +1,179 @@
+{
+	"scopeName": "source.zn",
+	"patterns": [
+		{
+			"include": "#expression"
+		}
+	],
+	"repository": {
+		"expression": {
+			"patterns": [
+				{
+					"include": "#constant"
+				},
+				{
+					"include": "#control"
+				},
+				{
+					"include": "#keyword"
+				},
+				{
+					"include": "#operator"
+				},
+				{
+					"include": "#function"
+				},
+				{
+					"include": "#var"
+				},
+				{
+					"include": "#class"
+				},
+				{
+					"include": "#paren-expression"
+				},
+				{
+					"include": "#brace-expression"
+				},
+				{
+					"include": "#bracket-expression"
+				},
+				{
+					"include": "#string"
+				},
+				{
+					"include": "#comment"
+				},
+				{
+					"include": "#annotation"
+				}
+			]
+		},
+		"number": {
+			"match": "\\d+\\.?\\d*",
+			"name": "constant.numeric.decimal"
+		},
+		"true": {
+			"match": "(True)",
+			"name": "constant.language.boolean.true"
+		},
+		"false": {
+			"match": "(False)",
+			"name": "constant.language.boolean.false"
+		},
+		"none": {
+			"match": "(None)",
+			"name": "constant.language.null"
+		},
+		"constant": {
+			"patterns": [
+				{
+					"include": "#number"
+				},
+				{
+					"include": "#true"
+				},
+				{
+					"include": "#false"
+				},
+				{
+					"include": "#none"
+				}
+			]
+		},
+		"operator": {
+			"match": "(\\||\\&|\\.|\\*|\\!|\\~|\\/|\\<|\\>|\\=|\\,|\\:)",
+			"name": "keyword.operator"
+		},
+		"paren-expression": {
+			"begin": "\\(",
+			"end": "\\)",
+			"beginCaptures": {
+				"0": {
+					"name": "punctuation.paren.open"
+				}
+			},
+			"endCaptures": {
+				"0": {
+					"name": "punctuation.paren.close"
+				}
+			},
+			"name": "expression.group",
+			"patterns": [
+				{
+					"include": "#expression"
+				}
+			]
+		},
+		"brace-expression": {
+			"begin": "\\{",
+			"end": "\\}",
+			"beginCaptures": {
+				"0": {
+					"name": "punctuation.definition.block.open"
+				}
+			},
+			"endCaptures": {
+				"0": {
+					"name": "punctuation.definition.block.close"
+				}
+			},
+			"name": "meta.block",
+			"patterns": [
+				{
+					"include": "#expression"
+				}
+			]
+		},
+		"bracket-expression": {
+			"begin": "\\[",
+			"end": "\\]",
+			"beginCaptures": {
+				"0": {
+					"name": "meta.array.literal"
+				}
+			},
+			"endCaptures": {
+				"0": {
+					"name": "meta.array.literal"
+				}
+			},
+			"name": "meta.array.literal",
+			"patterns": [
+				{
+					"include": "#expression"
+				}
+			]
+		},
+		"string": {
+			"begin": "i?\\'",
+			"end": "(?<!\\\\)\\'",
+			"beginCaptures": {
+				"0": {
+					"name": "punctuation.definition.string.begin"
+				}
+			},
+			"endCaptures": {
+				"0": {
+					"name": "punctuation.definition.string.end"
+				}
+			},
+			"name": "string.quoted.single"
+		},
+		"comment": {
+			"begin": ";",
+			"end": "\\n",
+			"beginCaptures": {
+				"0": {
+					"name": "comment.line"
+				}
+			},
+			"endCaptures": {
+				"0": {
+					"name": "comment.line"
+				}
+			},
+			"name": "comment.line"
+		}
+	}
+}
