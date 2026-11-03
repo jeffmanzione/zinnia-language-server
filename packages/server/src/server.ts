@@ -1,10 +1,11 @@
-import {CompletionItem, CompletionItemKind, createConnection, Definition, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CompletionItem, CompletionItemKind, createConnection, Definition, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
+import {callAt, classAt, classMembers, memberAccessAt, moduleMembers, signatureInformation} from './completion';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
-import {SemanticToken} from './semantics/semantic';
+import {SemanticClass, SemanticToken} from './semantics/semantic';
 import {documentSymbols} from './symbols';
 
 const KEYWORDS = [
@@ -134,6 +135,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       referencesProvider: true,
       documentSymbolProvider: true,
       completionProvider: {triggerCharacters: ['.']},
+      signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
     },
   };
 });
@@ -221,8 +223,52 @@ const COMPLETION_KINDS: Record<string, CompletionItemKind> = {
   variable: CompletionItemKind.Variable,
 };
 
+// The classes of the document and of builtin, for receivers whose class isn't
+// known.
+function knownClasses(info: SemanticDocInfo): {cls: SemanticClass, text: string}[] {
+  const builtin = analyzer.lookupDocInfoFromModuleName('builtin');
+  return [
+    ...(info.module?.classes ?? []).map(cls => ({cls: cls, text: info.text})),
+    ...(builtin?.module?.classes ?? []).map(cls => ({cls: cls, text: builtin!.text})),
+  ];
+}
+
+async function memberCompletions(
+    info: SemanticDocInfo, receiver: string, line: number): Promise<CompletionItem[]> {
+  if (receiver === 'self') {
+    const cls = classAt(info, line);
+    if (cls !== undefined) {
+      return classMembers(cls, info.text);
+    }
+  }
+  const imprt = info.module?.imports.find(i => i.name.id === receiver);
+  if (imprt !== undefined) {
+    const module = await analyzer.importedModule(info.path, imprt);
+    return module === undefined ? [] : moduleMembers(module);
+  }
+  // The receiver's class isn't known, so offer the members of all known
+  // classes.
+  const items = new Map<string, CompletionItem>();
+  for (const {cls, text} of knownClasses(info)) {
+    for (const item of classMembers(cls, text)) {
+      if (!items.has(item.label)) {
+        items.set(item.label, item);
+      }
+    }
+  }
+  return [...items.values()];
+}
+
 connection.onCompletion(async (params): Promise<CompletionItem[]> => {
   const info = await analysisFor(params.textDocument.uri);
+  const document = documents.get(params.textDocument.uri);
+  if (info !== undefined && document !== undefined) {
+    const access =
+        memberAccessAt(document.getText(), document.offsetAt(params.position));
+    if (access !== undefined) {
+      return memberCompletions(info, access.receiver, params.position.line);
+    }
+  }
   const items = new Map<string, CompletionItem>();
   for (const keyword of KEYWORDS) {
     items.set(keyword, {label: keyword, kind: CompletionItemKind.Keyword});
@@ -236,6 +282,70 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     }
   }
   return [...items.values()];
+});
+
+async function signatureFor(
+    info: SemanticDocInfo, receiver: string|undefined, name: string,
+    line: number): Promise<SignatureInformation|undefined> {
+  const methodOf = (cls: SemanticClass|undefined, text: string) => {
+    const method = cls?.methods.get(name);
+    return method && signatureInformation(
+        name, {params: method.ast.params, isNamed: method.ast.isNamed}, text);
+  };
+  if (receiver === 'self') {
+    return methodOf(classAt(info, line), info.text);
+  }
+  if (receiver !== undefined) {
+    const imprt = info.module?.imports.find(i => i.name.id === receiver);
+    if (imprt !== undefined) {
+      const module = await analyzer.importedModule(info.path, imprt);
+      const id = module &&
+          [...module.context?.block.definitions() ?? []].find(d => d.id === name);
+      return id?.signature &&
+          signatureInformation(name, id.signature, module!.text);
+    }
+    // The receiver's class isn't known: use the first known class with a
+    // method of this name.
+    for (const {cls, text} of knownClasses(info)) {
+      const signature = methodOf(cls, text);
+      if (signature !== undefined) {
+        return signature;
+      }
+    }
+    return undefined;
+  }
+  const local =
+      [...info.context?.block.definitions() ?? []].find(d => d.id === name);
+  if (local?.signature !== undefined) {
+    return signatureInformation(name, local.signature, info.text);
+  }
+  const builtin = analyzer.searchBuiltinForId(name);
+  if (builtin?.signature !== undefined) {
+    return signatureInformation(
+        name, builtin.signature,
+        analyzer.lookupDocInfoFromModuleName('builtin')?.text);
+  }
+  return undefined;
+}
+
+connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
+  const info = await analysisFor(params.textDocument.uri);
+  const document = documents.get(params.textDocument.uri);
+  if (info === undefined || document === undefined) {
+    return null;
+  }
+  const call = callAt(document.getText(), document.offsetAt(params.position));
+  const signature = call &&
+      await signatureFor(info, call.receiver, call.name, params.position.line);
+  if (signature === undefined) {
+    return null;
+  }
+  return {
+    signatures: [signature],
+    activeSignature: 0,
+    activeParameter: Math.min(
+        call!.argIndex, Math.max(0, (signature.parameters?.length ?? 1) - 1)),
+  };
 });
 
 documents.listen(connection);

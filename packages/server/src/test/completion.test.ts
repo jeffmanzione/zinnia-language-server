@@ -1,0 +1,91 @@
+import * as assert from 'node:assert/strict';
+import {describe, it} from 'node:test';
+
+import {callAt, classAt, classMembers, memberAccessAt, moduleMembers, signatureInformation} from '../completion';
+import {SemanticAnalyzer} from '../semantics/analyzer';
+
+// Returns [text] without its '|', and the offset of the '|'.
+function cursor(text: string): [string, number] {
+  return [text.replace('|', ''), text.indexOf('|')];
+}
+
+describe('memberAccessAt', () => {
+  it('finds the receiver and the prefix', () => {
+    assert.deepEqual(
+        memberAccessAt(...cursor('x = io.pri|')), {receiver: 'io', prefix: 'pri'});
+    assert.deepEqual(
+        memberAccessAt(...cursor('self.|')), {receiver: 'self', prefix: ''});
+    assert.equal(memberAccessAt(...cursor('x = 1|')), undefined);
+  });
+});
+
+describe('callAt', () => {
+  it('finds the callee and the argument index', () => {
+    assert.deepEqual(callAt(...cursor('f(1, |')), {receiver: undefined, name: 'f', argIndex: 1});
+    assert.deepEqual(
+        callAt(...cursor('io.println(g(1, 2), |')),
+        {receiver: 'io', name: 'println', argIndex: 1});
+    assert.deepEqual(
+        callAt(...cursor('f(g(1, 2|')), {receiver: undefined, name: 'g', argIndex: 1});
+  });
+
+  it('skips strings, arrays and finished calls', () => {
+    assert.deepEqual(
+        callAt(...cursor('f(\'a, (b\', |')),
+        {receiver: undefined, name: 'f', argIndex: 1});
+    assert.equal(callAt(...cursor('x = [1, |')), undefined);
+    assert.equal(callAt(...cursor('f(1)\ny = |')), undefined);
+  });
+});
+
+describe('member completion and signatures', () => {
+  const text = [
+    'class Point {',
+    '  field label',
+    '  static ORIGIN = 0',
+    '  new(field x, field y = 0) {}',
+    '  method norm(scale, offset = x + 1) x',
+    '}',
+    'self.LIMIT = 3',
+    'top = 1',
+    'function make(a, b) Point(a, b)',
+    '',
+  ].join('\n');
+
+  async function analyze() {
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([], async () => []);
+    return analyzer.parseDocument(
+        {textDocument: {uri: 'file:///completion.zn'}, text: text});
+  }
+
+  it('lists a module\'s members but not its top-level variables', async () => {
+    const labels = moduleMembers(await analyze()).map(i => i.label).sort();
+    assert.deepEqual(labels, ['LIMIT', 'Point', 'make']);
+  });
+
+  it('lists a class\'s members', async () => {
+    const info = await analyze();
+    const cls = classAt(info, 3)!;
+    assert.equal(cls.name.id, 'Point');
+    assert.deepEqual(
+        classMembers(cls, info.text).map(i => [i.label, i.detail]),
+        [
+          ['label', undefined], ['x', undefined], ['y', undefined],
+          ['ORIGIN', undefined], ['norm', 'norm(scale, offset = x + 1)'],
+        ]);
+    assert.equal(classAt(info, 7), undefined);
+  });
+
+  it('describes signatures with their default values', async () => {
+    const info = await analyze();
+    const make = [...info.context!.block.definitions()].find(d => d.id === 'make')!;
+    assert.deepEqual(
+        signatureInformation('make', make.signature!, info.text),
+        {label: 'make(a, b)', parameters: [{label: 'a'}, {label: 'b'}]});
+    const point = [...info.context!.block.definitions()].find(d => d.id === 'Point')!;
+    assert.equal(
+        signatureInformation('Point', point.signature!, info.text).label,
+        'Point(x, y = 0)');
+  });
+});

@@ -7,12 +7,13 @@ import {SemanticTokensParams2} from '../interfaces';
 import {fetchZinniaLibs, FileContents} from '../lib';
 
 import {ParseProblem, parseModule} from './parser';
-import {generateSemanticTokens, SemanticContext, SemanticIdentifier, SemanticModule, SemanticToken} from './semantic';
+import {generateSemanticTokens, SemanticContext, SemanticIdentifier, SemanticImport, SemanticModule, SemanticToken} from './semantic';
 
 export {ParseProblem};
 
 export interface SemanticDocInfo {
   path: string;
+  text: string;
   context?: SemanticContext;
   module?: SemanticModule;
   tokens: SemanticToken[];
@@ -96,6 +97,31 @@ export class SemanticAnalyzer {
     return fileName.slice(0, fileName.length - '.zn'.length);
   }
 
+  // Returns the analysis of the module that [imprt], in the file at
+  // [fromPath], imports, if it can be found.
+  async importedModule(fromPath: string, imprt: SemanticImport):
+      Promise<SemanticDocInfo|undefined> {
+    const source = imprt.ast.source;
+    const isPath = source.kind === 'StringExpr';
+    const name = isPath ? source.token.text.replace(/^i?'|'$/g, '') :
+                          source.token.text;
+    const libPath = isPath ? undefined : this.libNamesToFilePaths_.get(name);
+    if (libPath !== undefined) {
+      return this.docs_.get(libPath);
+    }
+    for (const dir of [...this.workspacePaths_, path.dirname(fromPath)]) {
+      const filePath = path.join(dir, name + '.zn').replace(/\\/g, '/');
+      if (this.docs_.has(filePath)) {
+        return this.docs_.get(filePath);
+      }
+      if (existsSync(filePath)) {
+        return this.parseDocument(
+            {textDocument: {uri: URI.file(filePath).toString()}});
+      }
+    }
+    return undefined;
+  }
+
   async lookupModule(moduleName: string): Promise<SemanticModule|null> {
     return (await this.lookupSemanticDocInfo_(moduleName))?.module ?? null;
   }
@@ -111,6 +137,7 @@ export class SemanticAnalyzer {
           generateSemanticTokens(path, this, parsed.module);
       const info: SemanticDocInfo = {
         path: path,
+        text: text,
         context: context,
         module: module,
         tokens: tokens,
@@ -129,6 +156,7 @@ export class SemanticAnalyzer {
       const previous = this.docs_.get(path);
       const info: SemanticDocInfo = {
         path: path,
+        text: text,
         context: previous?.context,
         module: previous?.module,
         tokens: previous?.tokens ?? [],

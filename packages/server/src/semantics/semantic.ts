@@ -238,19 +238,19 @@ interface SemanticAssign {
   rhs: SemanticExpression;
 }
 
-interface SemanticImport {
+export interface SemanticImport {
   ast: ImportStat;
   name: SemanticIdentifier;
   source: string;
 }
 
-interface SemanticField {
+export interface SemanticField {
   ast: FieldStat|ParamExpr;
   token: Token;
   name: SemanticIdentifier;
 }
 
-interface SemanticStatic {
+export interface SemanticStatic {
   ast: StaticStat;
   name: SemanticIdentifier;
   expr: SemanticExpression;
@@ -263,7 +263,7 @@ interface SemanticParam {
   defaultValue?: SemanticExpression;
 }
 
-interface SemanticMethod {
+export interface SemanticMethod {
   ast: MethodStat;
   name: SemanticIdentifier;
   params: SemanticParam[];
@@ -272,7 +272,7 @@ interface SemanticMethod {
   className: string;
 }
 
-interface SemanticClass {
+export interface SemanticClass {
   ast: ClassStat;
   name: SemanticIdentifier;
   superName?: SemanticExpression;
@@ -483,6 +483,11 @@ class Block {
       return true;
     }
     return !this.inMethod && MODULE_MEMBERS.has(name);
+  }
+
+  // The names defined in this block.
+  definitions(): IterableIterator<SemanticIdentifier> {
+    return this.members.values();
   }
 
   // Declares a member of the module (`self.name = ...` at the top level).
@@ -1636,9 +1641,9 @@ function processClass(
   }
   for (const classStat of stat.stats) {
     if (classStat.kind === 'MethodStat') {
-      const meth = processMethod(
-          classStat, stat, processIdentifier(classStat.name, context, 'method'),
-          fields, context);
+      const methodName = processIdentifier(classStat.name, context, 'method');
+      methodName.signature = {params: classStat.params, isNamed: classStat.isNamed};
+      const meth = processMethod(classStat, stat, methodName, fields, context);
       methods.set(meth.name.id, meth);
     }
   }
