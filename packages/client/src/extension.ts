@@ -1,5 +1,6 @@
 import {commands, ExtensionContext, Terminal, Uri, window, workspace} from 'vscode';
 import {LanguageClient, LanguageClientOptions, ServerOptions, TransportKind} from 'vscode-languageclient/node';
+import {ZinniaTests} from './testing';
 import {SERVER_ENTRY_POINT_PATH, ZINNIA_DOCUMENT_SELECTOR, ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME} from 'zinnia-language-shared/constants';
 
 let client: LanguageClient;
@@ -11,7 +12,7 @@ function shellQuote(arg: string): string {
 }
 
 // Runs the Zinnia file at [uri], or the active editor's, with the configured
-// executable, in a terminal of its own. The server's test lenses use this.
+// executable, in a terminal of its own.
 function runFile(uri?: string): void {
   const file = uri !== undefined ? Uri.parse(uri) : window.activeTextEditor?.document.uri;
   if (file === undefined || file.scheme !== 'file') {
@@ -28,8 +29,8 @@ function runFile(uri?: string): void {
 }
 
 // The server provides its features through the standard Language Server
-// Protocol, so the client needs no providers of its own, only the command its
-// test lenses run.
+// Protocol. The client adds the test explorer, and a command that runs the
+// current file.
 export function activate(context: ExtensionContext) {
   context.subscriptions.push(commands.registerCommand('zinnia.runFile', runFile));
   const serverEntryPoint = context.asAbsolutePath(SERVER_ENTRY_POINT_PATH);
@@ -57,8 +58,10 @@ export function activate(context: ExtensionContext) {
   client = new LanguageClient(
       ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME, serverOptions, clientOptions);
 
-  // Start the client. This will also launch the server
-  client.start();
+  // Start the client, which launches the server, then list the workspace's
+  // tests.
+  const zinniaTests = new ZinniaTests(context, client);
+  client.start().then(() => zinniaTests.refreshAll());
 }
 
 export function deactivate(): Thenable<void>|undefined {

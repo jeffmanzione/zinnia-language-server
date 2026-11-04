@@ -20,7 +20,9 @@
 	"engines": {
 		"vscode": "^1.127.0"
 	},
-	"activationEvents": [],
+	"activationEvents": [
+		"workspaceContains:**/*.zn"
+	],
 	"main": "./packages/client/dist/extension.js",
 	"workspaces": [
 		"packages/*"
@@ -92,7 +94,7 @@
 					"scope": "machine-overridable",
 					"type": "string",
 					"default": "zinnia",
-					"description": "The zinnia executable that the Run tests lens runs files with."
+					"description": "The zinnia executable that runs tests and Zinnia: Run File."
 				},
 				"zinnia.libraryPath": {
 					"scope": "machine-overridable",

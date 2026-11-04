@@ -4,7 +4,7 @@ import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {DiagnosticData, quickFixes} from './codeActions';
-import {testLenses} from './codeLens';
+import {DOCUMENT_TESTS_REQUEST, testsOf, TestFile, WORKSPACE_TESTS_REQUEST} from './tests';
 import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature, unimportedModuleItems, unimportedModuleMembers} from './completion';
 import {foldingRanges} from './folding';
 import {formatRows, formatText} from './format';
@@ -180,7 +180,6 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       documentHighlightProvider: true,
       callHierarchyProvider: true,
       inlayHintProvider: true,
-      codeLensProvider: {resolveProvider: false},
       codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
@@ -213,11 +212,16 @@ connection.onInitialized(async () => {
   }
   const start = Date.now();
   const count = await analyzer.indexWorkspace();
+  resolveIndexed();
   connection.console.log(
       `Indexed ${count} Zinnia files in ${Date.now() - start} ms.`);
   // Documents opened while indexing may import modules indexed after them.
   await refreshOpenDocuments(documents.all().map(d => filePathOf(d.uri)));
 });
+
+// Resolves once the workspace has been indexed.
+let resolveIndexed: () => void;
+const indexed = new Promise<void>(resolve => resolveIndexed = resolve);
 
 // Reanalyzes the open documents at [paths] with their current text, e.g.
 // after a module they import changed, and sends their diagnostics again.
@@ -737,9 +741,21 @@ connection.onDocumentOnTypeFormatting(params => {
   return lineEdits(formatRows(document.getText(), params.options, line, line), document);
 });
 
-connection.onCodeLens(async params => {
-  const info = await analysisFor(params.textDocument.uri);
-  return info === undefined ? [] : testLenses(info);
+// The tests of a document, for the client's test explorer.
+connection.onRequest(DOCUMENT_TESTS_REQUEST, async (params: {uri: string}):
+                         Promise<TestFile|null> => {
+  const info = await analysisFor(params.uri) ??
+      analyzer.lookupDocInfoFromFile(filePathOf(params.uri));
+  return info === undefined ? null : testsOf(info);
+});
+
+// The tests of every analyzed workspace file, once indexing is done.
+connection.onRequest(WORKSPACE_TESTS_REQUEST, async (): Promise<TestFile[]> => {
+  await indexed;
+  return [...analyzer.analyzedDocuments()]
+      .filter(info => !analyzer.isStandardLibraryFile(info.path))
+      .map(testsOf)
+      .filter(file => file.classes.length > 0);
 });
 
 connection.onDocumentHighlight(async params => {
