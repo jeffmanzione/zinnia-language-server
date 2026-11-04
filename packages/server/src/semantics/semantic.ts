@@ -153,9 +153,9 @@ function problemAt(
 // Names that are always defined: module-level globals and names defined
 // natively in builtin rather than in builtin.zn.
 const GLOBAL_NAMES = new Set([
-  'self', 'args', '__main', 'Char', 'Frame', 'Scope', 'Object', 'Class',
-  'Function', 'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple',
-  'Error', 'Future', ...Object.keys(NATIVE_FUNCTIONS.builtin),
+  'self', 'args', '__main', 'Frame', 'Scope', 'Object', 'Class', 'Function',
+  'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple',
+  ...Object.keys(NATIVE_FUNCTIONS.builtin),
   ...NATIVE_CLASSES.builtin,
 ]);
 
