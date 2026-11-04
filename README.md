@@ -32,10 +32,12 @@ that speaks the [Language Server Protocol](https://microsoft.github.io/language-
 - **Formatting** of documents and ranges, and re-indenting a line when its
   closing bracket is typed. Zinnia files default to two-space indentation.
 - **Folding** of blocks, comments and imports.
-- **Run tests**: a lens on each `@test.TestClass` class runs the file with
-  `zinnia` (set `zinnia.executable` if it isn't on your `PATH`). zinnia's
-  test runner runs all of a file's tests at once. **Zinnia: Run File** runs
-  the current file the same way.
+- **Tests** in VS Code's test explorer: each `@test.Test` method of a
+  `@test.TestClass` class can be run on its own, by class, by file or all at
+  once, with failures shown at the test. Tests run with `zinnia` (set
+  `zinnia.executable` if it isn't on your `PATH`) from the workspace folder,
+  and need a zinnia whose `test` library takes `--test`. **Zinnia: Run File**
+  runs the current file in a terminal.
 
 The server analyzes every Zinnia file in the workspace when it starts, and
 follows changes made in the editor and on disk.
@@ -60,8 +62,8 @@ Build the server, then run it over stdio:
 git clone https://github.com/jeffmanzione/zinnia-language-server.git
 cd zinnia-language-server
 npm ci
-npm run compile
-node packages/server/out/server.js --stdio
+npm run bundle
+node packages/server/dist/server.js --stdio
 ```
 
 The server reads one initialization option, `libraryPath`: the directory of
@@ -72,7 +74,7 @@ the standard library to use instead of the bundled one.
 ```lua
 vim.filetype.add({ extension = { zn = 'zinnia' } })
 vim.lsp.config('zinnia', {
-  cmd = { 'node', '/path/to/zinnia-language-server/packages/server/out/server.js', '--stdio' },
+  cmd = { 'node', '/path/to/zinnia-language-server/packages/server/dist/server.js', '--stdio' },
   filetypes = { 'zinnia' },
   root_markers = { '.git' },
 })
@@ -86,7 +88,7 @@ Neovim shows the server's semantic highlighting.
 ```toml
 [language-server.zinnia]
 command = "node"
-args = ["/path/to/zinnia-language-server/packages/server/out/server.js", "--stdio"]
+args = ["/path/to/zinnia-language-server/packages/server/dist/server.js", "--stdio"]
 
 [[language]]
 name = "zinnia"
@@ -120,7 +122,8 @@ library's source, are listed in `packages/server/src/semantics/natives.ts`.
 ```shell
 npm install
 npm test        # compiles and runs the tests
-npm run watch   # recompiles on change
+npm run watch   # rebundles on change, for F5
+npm run bundle  # bundles the client and server into packages/*/dist
 npm run build   # packages the extension as a .vsix
 ```
 

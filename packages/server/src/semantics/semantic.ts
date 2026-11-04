@@ -2,7 +2,7 @@
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
 import {AddChainExpr, MemberAccessExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
-import {NATIVE_CLASSES, NATIVE_FUNCTIONS, NATIVE_METHODS} from './natives';
+import {NATIVE_CLASSES, NATIVE_FUNCTIONS, NATIVE_METHODS, nativeMethodsOf} from './natives';
 import {Token, TokenKind} from './tokenizer';
 
 export interface SemanticToken {
@@ -23,6 +23,13 @@ type IdType =
 export interface TokenFile {
   token: Token;
   filePath: string;
+}
+
+// A value a function or method returns: an expression, or `self` in a method
+// of a class.
+interface ReturnValue {
+  value?: SemanticExpression;
+  selfClass?: SemanticIdentifier;
 }
 
 export class SemanticIdentifier {
@@ -51,6 +58,9 @@ export class SemanticIdentifier {
   assignments: SemanticExpression[] = [];
   // How many times the name is read, as opposed to assigned.
   reads = 0;
+  // For a function or method: the values it returns, from which the class of
+  // its result is inferred.
+  returns: ReturnValue[] = [];
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -104,10 +114,12 @@ export interface SemanticProblem {
   endCol?: number;
   // Whether the code is unneeded: unused or unreachable.
   unnecessary?: boolean;
+  // For an unknown member: the members the class has.
+  suggestions?: string[];
 }
 
 export type ProblemCode = 'undefined-name'|'hidden-top-level-variable'|
-    'unused-import'|'unused-variable'|'unreachable-code';
+    'unused-import'|'unused-variable'|'unreachable-code'|'unknown-member';
 
 function hiddenTopLevelVariableProblem(
     use: Token, found: SemanticIdentifier): SemanticProblem {
@@ -141,9 +153,9 @@ function problemAt(
 // Names that are always defined: module-level globals and names defined
 // natively in builtin rather than in builtin.zn.
 const GLOBAL_NAMES = new Set([
-  'self', 'args', '__main', 'Char', 'Frame', 'Scope', 'Object', 'Class',
-  'Function', 'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple',
-  'Error', 'Future', ...Object.keys(NATIVE_FUNCTIONS.builtin),
+  'self', 'args', '__main', 'Frame', 'Scope', 'Object', 'Class', 'Function',
+  'FunctionRef', 'Module', 'String', 'IString', 'Array', 'Tuple',
+  ...Object.keys(NATIVE_FUNCTIONS.builtin),
   ...NATIVE_CLASSES.builtin,
 ]);
 
@@ -424,6 +436,11 @@ class FileState {
   readonly locals: SemanticIdentifier[] = [];
   // Variables that needn't be used, such as a catch's.
   readonly mayBeUnused = new Set<SemanticIdentifier>();
+  // The names assigned as members of objects anywhere in the file, as in
+  // `obj.name = ...`, which may add members that classes don't declare.
+  readonly assignedMembers = new Set<string>();
+  // Whether the file sets members by name, with $set.
+  setsMembersByName = false;
 }
 
 // Standard library modules whose annotations create no classes other than the
@@ -448,6 +465,8 @@ interface BlockOptions {
   inheritsUnknownMembers?: boolean;
   inMethod?: boolean;
   classId?: SemanticIdentifier;
+  // The function or method whose body this is, or null for a lambda's.
+  functionId?: SemanticIdentifier|null;
 }
 
 class Block {
@@ -464,6 +483,8 @@ class Block {
   readonly classId?: SemanticIdentifier;
   // Whether this block is in a named function or method.
   readonly inFunction: boolean;
+  // The named function or method whose body this block is in, if any.
+  readonly functionId?: SemanticIdentifier;
 
   constructor(
       private readonly analyzer: SemanticAnalyzer,
@@ -472,6 +493,9 @@ class Block {
     this.file = parent?.file ?? new FileState();
     this.classId = options.classId ?? parent?.classId;
     this.inFunction = kind === 'function' || (parent?.inFunction ?? false);
+    this.functionId = options.functionId !== undefined ?
+        options.functionId ?? undefined :
+        parent?.functionId;
     this.inheritsUnknownMembers =
         options.inheritsUnknownMembers ?? parent?.inheritsUnknownMembers ?? false;
     this.inMethod = options.inMethod ?? parent?.inMethod ?? false;
@@ -861,21 +885,8 @@ export function inferType(
     case 'ParensExpr':
       return inferType(
           (expr as SemanticParens).expr, analyzer, depth + 1);
-    case 'PostfixChainExpr': {
-      // A constructor call: `Foo(...)` or `module.Foo(...)`.
-      const postfix = expr as SemanticPostfix;
-      const pfxs = postfix.ast.postfixes;
-      const last = pfxs[pfxs.length - 1];
-      if (!(postfix.base instanceof SemanticIdentifier) ||
-          (last.kind !== 'FunctionCallExpr' && last.kind !== 'EmptyParensExpr') ||
-          pfxs.slice(0, -1).some(p => p.kind !== 'MemberAccessExpr')) {
-        return undefined;
-      }
-      const members = pfxs.slice(0, -1).map(
-          p => (p as MemberAccessExpr).field.token);
-      const cls = namedClass(postfix.base, members, postfix.context);
-      return cls === undefined ? undefined : {name: cls.name.id, cls: cls};
-    }
+    case 'PostfixChainExpr':
+      return walkChain(expr as SemanticPostfix, analyzer, depth + 1);
   }
   return undefined;
 }
@@ -902,6 +913,98 @@ function inferIdentifierType(
     result = type;
   }
   return result;
+}
+
+// Infers the class of what [id], a function or method, returns, if all its
+// return values have the same class. None, numbers and booleans are ignored.
+function inferReturnType(
+    id: SemanticIdentifier, analyzer: SemanticAnalyzer,
+    depth: number): InferredType|undefined {
+  let result: InferredType|undefined;
+  for (const ret of resolved(id).returns) {
+    if (ret.value !== undefined && isConstantExpr(ret.value.ast as Expression)) {
+      continue;
+    }
+    const selfClass = ret.selfClass && resolved(ret.selfClass).cls;
+    const type = selfClass !== undefined ?
+        {name: selfClass.name.id, cls: selfClass} :
+        inferType(ret.value, analyzer, depth + 1);
+    if (type === undefined || (result !== undefined && result.name !== type.name)) {
+      return undefined;
+    }
+    result = type;
+  }
+  return result;
+}
+
+// Where a chain like `a.b().c` is, as it's followed: a value of a known (or
+// unknown) class, a module, or something that can be called.
+type ChainState =|{kind: 'value', type?: InferredType}|
+    {kind: 'module', id: SemanticIdentifier}|
+    {kind: 'callable', id: SemanticIdentifier};
+
+function isModuleName(id: SemanticIdentifier): boolean {
+  return id.importSource !== undefined ||
+      (id.type === 'variable' && id.modifiers.includes('defaultLibrary'));
+}
+
+function stateOf(
+    id: SemanticIdentifier, analyzer: SemanticAnalyzer, depth: number): ChainState {
+  id = resolved(id);
+  if (isModuleName(id)) {
+    return {kind: 'module', id: id};
+  }
+  if (id.type === 'class' || id.type === 'function' || id.type === 'method') {
+    return {kind: 'callable', id: id};
+  }
+  return {kind: 'value', type: inferType(id, analyzer, depth + 1)};
+}
+
+// Follows the chain [postfix], calling [onMember] with each member accessed,
+// what it refers to if that's known, and the class of the object it's a
+// member of if that's known. Returns the class of the chain's value.
+function walkChain(
+    postfix: SemanticPostfix, analyzer: SemanticAnalyzer, depth: number,
+    onMember?: (token: Token, member: SemanticIdentifier|undefined,
+                receiver: InferredType|undefined) => void): InferredType|
+    undefined {
+  if (depth > MAX_INFERENCE_DEPTH || !(postfix.base instanceof SemanticIdentifier)) {
+    return undefined;
+  }
+  const selfClass = postfix.selfClass && resolved(postfix.selfClass).cls;
+  let state: ChainState = selfClass !== undefined ?
+      {kind: 'value', type: {name: selfClass.name.id, cls: selfClass}} :
+      stateOf(postfix.base, analyzer, depth);
+  for (const pfx of postfix.ast.postfixes) {
+    if (pfx.kind === 'MemberAccessExpr') {
+      const token = pfx.field.token;
+      let member: SemanticIdentifier|undefined;
+      let receiver: InferredType|undefined;
+      if (state.kind === 'module') {
+        member = lookupMemberFromPossibleModule(state.id, token, postfix.context) ??
+            undefined;
+      } else if (state.kind === 'value' && state.type?.cls !== undefined) {
+        receiver = state.type;
+        member = memberOf(state.type.cls, token.text, analyzer);
+      }
+      onMember?.(token, member, receiver);
+      state = member === undefined ? {kind: 'value'} : stateOf(member, analyzer, depth);
+    } else if (pfx.kind === 'FunctionCallExpr' || pfx.kind === 'EmptyParensExpr') {
+      if (state.kind === 'callable') {
+        const cls = resolved(state.id).cls;
+        state = {
+          kind: 'value',
+          type: cls !== undefined ? {name: cls.name.id, cls: cls} :
+                                    inferReturnType(state.id, analyzer, depth),
+        };
+      } else {
+        state = {kind: 'value'};
+      }
+    } else {
+      state = {kind: 'value'};
+    }
+  }
+  return state.kind === 'value' ? state.type : undefined;
 }
 
 // The class [cls] extends, if it's known.
@@ -961,62 +1064,83 @@ function generateTokensForPostfix(
   if (pstfx.base != null) {  // TODO remove check.
     generateTokensForExpression(pstfx.base, context, generator);
   }
-  let curId: SemanticIdentifier|null = pstfx.base;
-  const selfClass = pstfx.selfClass && resolved(pstfx.selfClass).cls;
-  let curType: InferredType|undefined = selfClass !== undefined ?
-      {name: selfClass.name.id, cls: selfClass} :
-      inferType(pstfx.base, pstfx.context.analyzerForInference);
   for (const nestedExpr of pstfx.nestedExprs) {
-    if (nestedExpr == null) {
-      continue;
-    }
     // Member names are tokens; everything else is an expression.
-    if (!('ast' in nestedExpr)) {
-      const tok = nestedExpr as Token;
-      const foundId = lookupMemberFromPossibleModule(
-          curId as SemanticIdentifier, tok, context);
-
-      if (foundId) {
-        generateTokenForIdentiferToken(
-            foundId, {
-              token: tok,
-              filePath: context.filePath,
-            },
-            context, generator);
-        curId = null;
-        curType = undefined;
-        continue;
-      }
-
-      // A member of an object whose class is known.
-      const member =
-          curType?.cls && memberOf(curType.cls, tok.text, pstfx.context.analyzerForInference);
-      if (member) {
-        generateTokenForIdentiferToken(
-            member, {token: tok, filePath: context.filePath}, context,
-            generator);
-        curId = null;
-        // A call or index of the member gives something else.
-        const next = tok.next?.kind;
-        curType = member.type === 'property' &&
-                next !== TokenKind.SYMBOL_LPAREN &&
-                next !== TokenKind.SYMBOL_LBRACKET ?
-            inferType(member, pstfx.context.analyzerForInference) :
-            undefined;
-        continue;
-      }
-      curId = null;
-      curType = undefined;
-
-      generator.createToken(
-          tok,
-          tok.next?.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property');
-    } else {
+    if (nestedExpr != null && 'ast' in nestedExpr) {
       generateTokensForExpression(
           nestedExpr as SemanticExpression, context, generator);
-      curType = undefined;
     }
   }
+  const analyzer = pstfx.context.analyzerForInference;
+  walkChain(pstfx, analyzer, 0, (token, member, receiver) => {
+    if (member !== undefined) {
+      generateTokenForIdentiferToken(
+          member, {token: token, filePath: context.filePath}, context, generator);
+      return;
+    }
+    generator.createToken(
+        token,
+        token.next?.kind === TokenKind.SYMBOL_LPAREN ? 'method' : 'property');
+    if (receiver?.cls !== undefined) {
+      checkMember(receiver.cls, token, pstfx.context, analyzer);
+    }
+  });
+}
+
+// Reports [token], which names no member of [cls], when that's certain: the
+// classes it extends are all known, are defined outside the standard library
+// (whose natively defined members may not all be listed) and have no
+// annotations (which may add members), and nothing assigns or sets a member
+// of that name.
+function checkMember(
+    cls: SemanticClass, token: Token, context: SemanticContext,
+    analyzer: SemanticAnalyzer): void {
+  const file = context.block.file;
+  const name = token.text;
+  if (file.setsMembersByName || file.assignedMembers.has(name) ||
+      analyzer.isStandardLibraryFile(context.filePath)) {
+    return;
+  }
+  const chain = classChain(cls, analyzer);
+  const object = analyzer.searchBuiltinForId('Object')?.cls;
+  for (const c of chain) {
+    if (c === object) {
+      continue;
+    }
+    const declaration = c.name.tokens[0];
+    // The file being analyzed isn't stored until its analysis is done.
+    const declaringFile = declaration?.filePath === context.filePath ?
+        file :
+        declaration && analyzer.lookupDocInfoFromFile(declaration.filePath)?.context?.block.file;
+    if (declaration === undefined || declaringFile === undefined ||
+        analyzer.isStandardLibraryFile(declaration.filePath) ||
+        (c.ast.annots?.length ?? 0) > 0 ||
+        (c.superName !== undefined && superclassOf(c) === undefined) ||
+        declaringFile.setsMembersByName || declaringFile.assignedMembers.has(name) ||
+        nativeMethodsOf(c.name.id)[name] !== undefined) {
+      return;
+    }
+  }
+  const members = new Set<string>(Object.keys(nativeMethodsOf('Object')));
+  for (const c of chain) {
+    for (const m of c.methods.keys()) {
+      members.add(m);
+    }
+    for (const f of c.fields) {
+      members.add(f.name.id);
+    }
+    for (const st of c.statics.keys()) {
+      members.add(st);
+    }
+  }
+  if (members.has(name)) {
+    return;
+  }
+  file.problems.push({
+    ...problemAt(token, `'${cls.name.id}' has no member '${name}'.`),
+    code: 'unknown-member',
+    suggestions: [...members].filter(m => m !== 'new'),
+  });
 }
 
 function generateTokensForNamedArg(
@@ -1450,6 +1574,9 @@ function processPostfix(
       }
     } else if (pfx.kind === 'MemberAccessExpr') {
       nestedExprs.push(pfx.field.token);
+      if (pfx.field.token.text === '$set') {
+        context.block.file.setsMembersByName = true;
+      }
     }
   }
   const isSelf = postfix.lhs.kind === 'IdentifierExpr' &&
@@ -1548,7 +1675,7 @@ function recordDefault(param: SemanticParam): void {
 
 function processAnon(expr: AnonExpr, context: SemanticContext): SemanticAnon {
   const params: SemanticParam[] = [];
-  const newContext = context.newBlock();
+  const newContext = context.newBlock('block', {functionId: null});
   for (const param of expr.params) {
     params.push({
       ast: param,
@@ -1658,8 +1785,12 @@ function processAssignLhs(
   }
 
   if (isPostfixExpr(expr)) {
-    // TODO: handle postfix
-    return {ast: expr, expr: processPostfix(expr as PostfixChainExpr, context)};
+    const chain = expr as PostfixChainExpr;
+    const last = chain.postfixes[chain.postfixes.length - 1];
+    if (last?.kind === 'MemberAccessExpr') {
+      context.block.file.assignedMembers.add(last.field.token.text);
+    }
+    return {ast: expr, expr: processPostfix(chain, context)};
   }
   return {
     ast: expr,
@@ -1738,7 +1869,7 @@ function processFunction(
   const name = processIdentifier(stat.name, context, 'function');
   name.signature = {params: stat.params, isNamed: stat.isNamed};
   const params: SemanticParam[] = [];
-  const newContext = context.newBlock('function');
+  const newContext = context.newBlock('function', {functionId: name});
   for (const param of stat.params) {
     params.push({
       ast: param,
@@ -1750,13 +1881,27 @@ function processFunction(
     });
     recordDefault(params[params.length - 1]);
   }
+  const body = processStatement(stat.stat, newContext);
+  recordExpressionBody(name, stat.stat, body);
   return {
     ast: stat,
     name: name,
     params: params,
-    stat: processStatement(stat.stat, newContext),
+    stat: body,
     annots: annots
   };
+}
+
+// Records the value of a function or method whose body is an expression, as
+// in `function f(x) x + 1`, as what it returns.
+function recordExpressionBody(
+    name: SemanticIdentifier, ast: Statement, body: SemanticStatement): void {
+  if (body !== undefined && ast.kind !== 'CompoundStat' && ast.kind !== 'JumpStat' &&
+      ast.kind !== 'RaiseStat' && ast.kind !== 'ExitStat' && ast.kind !== 'SelectStat' &&
+      ast.kind !== 'WhileStat' && ast.kind !== 'ForStat' && ast.kind !== 'ForeachStat' &&
+      ast.kind !== 'TryStat' && ast.kind !== 'FunctionStat') {
+    resolved(name).returns.push({value: body as SemanticExpression});
+  }
 }
 
 // Marks the names a catch assigns, which needn't be used.
@@ -1909,11 +2054,15 @@ function processStatement(
       body: processStatement(stat.stat, newContext)
     };
   } else if (stat.kind === 'JumpStat') {
-    return {
-      ast: stat,
-      expr: stat.expr == null ? undefined :
-                                processExpression(stat.expr, context)
-    };
+    const expr = stat.expr == null ? undefined : processExpression(stat.expr, context);
+    const functionId = context.block.functionId;
+    if (stat.token.text === 'return' && expr !== undefined && functionId !== undefined) {
+      const isSelf = stat.expr!.kind === 'IdentifierExpr' &&
+          (stat.expr as IdentifierExpr).token.text === 'self';
+      resolved(functionId).returns.push(
+          isSelf ? {selfClass: context.block.classId} : {value: expr});
+    }
+    return {ast: stat, expr: expr};
   } else if (stat.kind === 'TryStat') {
     const tryContext = context.newBlock();
     const catchContext = context.newBlock();
@@ -2004,9 +2153,11 @@ function processMethod(
     }
   }
   const params: SemanticParam[] = [];
-  const newContext = context.newBlock(
-      'function',
-      {inMethod: true, inheritsUnknownMembers: classStat.super !== undefined});
+  const newContext = context.newBlock('function', {
+    inMethod: true,
+    inheritsUnknownMembers: classStat.super !== undefined,
+    functionId: name,
+  });
   for (const param of stat.params) {
     if (param.field != null) {
       fields.push({
@@ -2029,11 +2180,15 @@ function processMethod(
       resolved(fields[fields.length - 1].name).assignments.push(defaultValue);
     }
   }
+  const body = processStatement(stat.stat, newContext);
+  if (stat.name.kind !== 'NewExpr') {
+    recordExpressionBody(name, stat.stat, body);
+  }
   return {
     ast: stat,
     name: name,
     params: params,
-    stat: processStatement(stat.stat, newContext),
+    stat: body,
     className: classStat.name.token.text,
     annots
   };

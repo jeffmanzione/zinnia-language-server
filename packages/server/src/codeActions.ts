@@ -8,11 +8,13 @@ import {SemanticDocInfo} from './semantics/analyzer';
 export interface DiagnosticData {
   // For a hidden top-level variable: where it's declared, 0-based.
   declaration?: {row: number, col: number};
+  // For an unknown member: the members the class has.
+  suggestions?: string[];
 }
 
 // The row after the document's imports, where a new import goes: after the
 // last top-level import, or at the start.
-function importRow(info: SemanticDocInfo): number {
+export function importRow(info: SemanticDocInfo): number {
   let row = 0;
   for (const imprt of info.module?.imports ?? []) {
     row = Math.max(row, imprt.ast.importTok.pos.rowBegin);
@@ -79,7 +81,17 @@ export function quickFixes(
     if (name === undefined || name === '') {
       continue;
     }
-    if (diagnostic.code === 'undefined-name') {
+    if (diagnostic.code === 'unknown-member') {
+      const members = (diagnostic.data as DiagnosticData|undefined)?.suggestions ?? [];
+      for (const similar of similarNames(name, members)) {
+        actions.push({
+          title: `Change to '${similar}'`,
+          kind: CodeActionKind.QuickFix,
+          diagnostics: [diagnostic],
+          edit: {changes: {[uri]: [TextEdit.replace(diagnostic.range, similar)]}},
+        });
+      }
+    } else if (diagnostic.code === 'undefined-name') {
       names ??= lookup.names();
       for (const similar of similarNames(name, names)) {
         actions.push({

@@ -63,7 +63,7 @@ jobs:
           npm test
 
       - name: Package
-        run: npx --yes @vscode/vsce@4.0.0 package --follow-symlinks --out "$VSIX"
+        run: npx --yes @vscode/vsce@4.0.0 package --no-dependencies --out "$VSIX"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -90,7 +90,7 @@ jobs:
             echo "::notice::No VSCE_PAT secret; not publishing to the VS Code Marketplace."
             exit 0
           fi
-          npx --yes @vscode/vsce@4.0.0 publish --packagePath "$VSIX"
+          npx --yes @vscode/vsce@4.0.0 publish --no-dependencies --packagePath "$VSIX"
 
       # Needs an OVSX_PAT secret: an access token from open-vsx.org, whose
       # namespace matches the extension's publisher.

@@ -1,17 +1,19 @@
 .vscode/**
-**/*.ts
-tsconfig.tsbuildinfo
-**/*.map
+.github/**
 .gitignore
-**/tsconfig.json
-**/tsconfig.base.json
-node_modules/**
-!node_modules/vscode-*/**
-!node_modules/{minimatch,brace-expansion,concat-map,balanced-match}/**
-!node_modules/{semver,lru-cache,yallist}/**
-!node_modules/zinnia-language-shared/package.json
-!node_modules/zinnia-language-shared/out/*.js
-**/out/test/**
 scripts/**
-**/*.tsbuildinfo
 *.vsix
+**/*.ts
+**/*.map
+**/tsconfig*.json
+**/*.tsbuildinfo
+# The client and server are bundled into packages/*/dist with their
+# dependencies (see scripts/bundle.mjs), so neither the compiled sources nor
+# node_modules are needed.
+node_modules/**
+packages/*/node_modules/**
+packages/*/out/**
+packages/*/src/**
+packages/*/package.json
+!packages/shared/src/language-configuration.json
+!packages/client/src/zinnia.tmGrammar.json

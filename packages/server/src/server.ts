@@ -4,10 +4,11 @@ import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {DiagnosticData, quickFixes} from './codeActions';
-import {testLenses} from './codeLens';
-import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
+import {DOCUMENT_TESTS_REQUEST, testsOf, TestFile, WORKSPACE_TESTS_REQUEST} from './tests';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature, unimportedModuleItems, unimportedModuleMembers} from './completion';
 import {foldingRanges} from './folding';
 import {formatRows, formatText} from './format';
+import {hoverMarkdown} from './hover';
 import {documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from './navigation';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
@@ -99,15 +100,6 @@ function identifierLocations(token: SemanticToken): Location[] {
   return locations;
 }
 
-function hoverText(token: SemanticToken): string {
-  const kind = token.modifiers.includes('defaultLibrary') ? 'module' :
-      token.type === 'property'                         ? 'field' :
-                                                          token.type;
-  const name =
-      token.parentName ? `${token.parentName}.${token.text}` : token.text;
-  return `${kind} \`${name}\``;
-}
-
 // Pushes [tokens] to [builder] and returns it.
 function encodeTokens(
     tokens: SemanticToken[],
@@ -188,7 +180,6 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       documentHighlightProvider: true,
       callHierarchyProvider: true,
       inlayHintProvider: true,
-      codeLensProvider: {resolveProvider: false},
       codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
@@ -221,11 +212,16 @@ connection.onInitialized(async () => {
   }
   const start = Date.now();
   const count = await analyzer.indexWorkspace();
+  resolveIndexed();
   connection.console.log(
       `Indexed ${count} Zinnia files in ${Date.now() - start} ms.`);
   // Documents opened while indexing may import modules indexed after them.
   await refreshOpenDocuments(documents.all().map(d => filePathOf(d.uri)));
 });
+
+// Resolves once the workspace has been indexed.
+let resolveIndexed: () => void;
+const indexed = new Promise<void>(resolve => resolveIndexed = resolve);
 
 // Reanalyzes the open documents at [paths] with their current text, e.g.
 // after a module they import changed, and sends their diagnostics again.
@@ -307,9 +303,10 @@ function publishDiagnostics(document: TextDocument, info: SemanticDocInfo): void
       source: 'zinnia',
       tags: problem.unnecessary ? [DiagnosticTag.Unnecessary] : undefined,
       code: problem.code,
-      data: problem.declaration === undefined ?
+      data: problem.declaration === undefined && problem.suggestions === undefined ?
           undefined :
-          {declaration: problem.declaration} satisfies DiagnosticData,
+          {declaration: problem.declaration, suggestions: problem.suggestions} satisfies
+              DiagnosticData,
     };
   });
   connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});
@@ -366,7 +363,7 @@ connection.onHover(async (params): Promise<Hover|null> => {
     return null;
   }
   return {
-    contents: {kind: MarkupKind.Markdown, value: hoverText(token)},
+    contents: {kind: MarkupKind.Markdown, value: hoverMarkdown(info!, token, analyzer)},
     range: {
       start: {line: token.row, character: token.col},
       end: {line: token.row, character: token.col + token.text.length},
@@ -449,6 +446,25 @@ async function memberCompletions(
     return module === undefined ? [] :
                                   moduleMembers(module, moduleNameOf(imprt.ast), analyzer);
   }
+  // A module seen through another module's import, such as builtin's io.
+  const seen = info.tokens.find(
+      t => t.text === receiver && t.identifier !== undefined &&
+          resolved(t.identifier).importSource !== undefined);
+  const source = seen && resolved(seen.identifier!).importSource!;
+  if (source !== undefined) {
+    const declaration = resolved(seen!.identifier!).tokens[0];
+    const module = analyzer.analyzedImport(
+        declaration?.filePath ?? info.path, source.name, source.isPath);
+    if (module !== undefined) {
+      return moduleMembers(module, source.isPath ? undefined : source.name, analyzer);
+    }
+  }
+  // A module that isn't imported yet: completing one of its members imports
+  // it.
+  const unimported = unimportedModuleMembers(info, receiver, analyzer);
+  if (unimported !== undefined) {
+    return unimported;
+  }
   const type = receiverType(
       info, receiver, position.line, position.character, analyzer);
   if (type !== undefined) {
@@ -498,6 +514,12 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
         COMPLETION_KINDS[token.type];
     if (kind !== undefined && !items.has(token.text)) {
       items.set(token.text, {label: token.text, kind: kind});
+    }
+  }
+  // Modules that aren't imported yet, which completing imports.
+  for (const item of info ? unimportedModuleItems(info, analyzer) : []) {
+    if (!items.has(item.label)) {
+      items.set(item.label, item);
     }
   }
   return [...items.values()];
@@ -719,9 +741,21 @@ connection.onDocumentOnTypeFormatting(params => {
   return lineEdits(formatRows(document.getText(), params.options, line, line), document);
 });
 
-connection.onCodeLens(async params => {
-  const info = await analysisFor(params.textDocument.uri);
-  return info === undefined ? [] : testLenses(info);
+// The tests of a document, for the client's test explorer.
+connection.onRequest(DOCUMENT_TESTS_REQUEST, async (params: {uri: string}):
+                         Promise<TestFile|null> => {
+  const info = await analysisFor(params.uri) ??
+      analyzer.lookupDocInfoFromFile(filePathOf(params.uri));
+  return info === undefined ? null : testsOf(info);
+});
+
+// The tests of every analyzed workspace file, once indexing is done.
+connection.onRequest(WORKSPACE_TESTS_REQUEST, async (): Promise<TestFile[]> => {
+  await indexed;
+  return [...analyzer.analyzedDocuments()]
+      .filter(info => !analyzer.isStandardLibraryFile(info.path))
+      .map(testsOf)
+      .filter(file => file.classes.length > 0);
 });
 
 connection.onDocumentHighlight(async params => {

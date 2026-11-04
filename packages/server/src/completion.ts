@@ -4,12 +4,14 @@
 // yet, so these read the text before the cursor and resolve names with the
 // document's last analysis.
 
-import {CompletionItem, CompletionItemKind, ParameterInformation, SignatureInformation} from 'vscode-languageserver/node';
+import {CompletionItem, CompletionItemKind, ParameterInformation, SignatureInformation, TextEdit} from 'vscode-languageserver/node';
+
+import {importRow} from './codeActions';
 
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ParamExpr} from './semantics/expressions';
 import {NATIVE_CLASSES, NATIVE_FUNCTIONS, nativeMethodsOf} from './semantics/natives';
-import {classChain, inferType, InferredType, SemanticClass, SemanticIdentifier, Signature} from './semantics/semantic';
+import {classChain, inferType, InferredType, resolved, SemanticClass, SemanticIdentifier, Signature} from './semantics/semantic';
 
 // A member access being typed: `receiver.prefix`.
 export interface MemberAccess {
@@ -215,6 +217,12 @@ export function moduleMembers(
       }
     }
   }
+  // Private members, by convention named with a leading _, come last.
+  for (const item of items.values()) {
+    if (item.label.startsWith('_')) {
+      item.sortText = `~${item.label}`;
+    }
+  }
   return [...items.values()];
 }
 
@@ -334,4 +342,59 @@ export function typeMethodSignature(
   }
   const native = nativeMethodsOf(type.name)[name];
   return native && nativeSignature(name, native);
+}
+
+// The edit that imports [name] into [info].
+function importEdit(info: SemanticDocInfo, name: string): TextEdit {
+  return TextEdit.insert({line: importRow(info), character: 0}, `import ${name}\n`);
+}
+
+// The module named [name] if [info] doesn't import it, and [name] isn't a
+// name it defines or sees through builtin.
+function unimportedModule(
+    info: SemanticDocInfo, name: string,
+    analyzer: SemanticAnalyzer): {info: SemanticDocInfo, libName?: string}|undefined {
+  // Names used without being defined don't count.
+  const defined = info.context?.block.findIdentifier(name, true);
+  const isUndefined = info.problems.some(
+      p => p.code === 'undefined-name' && p.message.startsWith(`'${name}'`));
+  if ((info.module?.imports ?? []).some(i => i.name.id === name) ||
+      (defined !== undefined && resolved(defined).tokens.length > 0 && !isUndefined) ||
+      !analyzer.importableModules(info.path).includes(name)) {
+    return undefined;
+  }
+  const lib = analyzer.lookupDocInfoFromModuleName(name);
+  if (lib !== undefined) {
+    return {info: lib, libName: name};
+  }
+  const module = analyzer.analyzedImport(info.path, name, false);
+  return module && {info: module};
+}
+
+// The members of [receiver], a module [info] doesn't import yet, each of
+// which imports it when completed; or undefined if [receiver] isn't one.
+export function unimportedModuleMembers(
+    info: SemanticDocInfo, receiver: string,
+    analyzer: SemanticAnalyzer): CompletionItem[]|undefined {
+  const module = unimportedModule(info, receiver, analyzer);
+  if (module === undefined) {
+    return undefined;
+  }
+  const edit = importEdit(info, receiver);
+  return moduleMembers(module.info, module.libName, analyzer)
+      .map(item => ({...item, additionalTextEdits: [edit]}));
+}
+
+// The modules [info] can import but doesn't, each of which imports it when
+// completed.
+export function unimportedModuleItems(
+    info: SemanticDocInfo, analyzer: SemanticAnalyzer): CompletionItem[] {
+  return analyzer.importableModules(info.path)
+      .filter(name => unimportedModule(info, name, analyzer) !== undefined)
+      .map(name => ({
+             label: name,
+             kind: CompletionItemKind.Module,
+             detail: `import ${name}`,
+             additionalTextEdits: [importEdit(info, name)],
+           }));
 }

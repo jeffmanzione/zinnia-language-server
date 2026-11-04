@@ -20,8 +20,10 @@
 	"engines": {
 		"vscode": "^1.127.0"
 	},
-	"activationEvents": [],
-	"main": "./packages/client/out/extension",
+	"activationEvents": [
+		"workspaceContains:**/*.zn"
+	],
+	"main": "./packages/client/dist/extension.js",
 	"workspaces": [
 		"packages/*"
 	],
@@ -92,7 +94,7 @@
 					"scope": "machine-overridable",
 					"type": "string",
 					"default": "zinnia",
-					"description": "The zinnia executable that the Run tests lens runs files with."
+					"description": "The zinnia executable that runs tests and Zinnia: Run File."
 				},
 				"zinnia.libraryPath": {
 					"scope": "machine-overridable",
@@ -104,10 +106,11 @@
 		}
 	},
 	"scripts": {
-		"vscode:prepublish": "npm run compile",
+		"vscode:prepublish": "npm run compile && npm run bundle",
 		"compile": "npx tsc -b",
-		"build": "npx --yes @vscode/vsce@4.0.0 package --follow-symlinks",
-		"watch": "npx tsc -b -w",
+		"bundle": "node scripts/bundle.mjs",
+		"build": "npx --yes @vscode/vsce@4.0.0 package --no-dependencies",
+		"watch": "node scripts/bundle.mjs --watch",
 		"test": "npm run compile && node --test \"packages/server/out/test/**/*.test.js\""
 	},
 	"vsce": {},
@@ -116,6 +119,7 @@
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.0",
+		"esbuild": "0.28.2",
 		"typescript": "^6.0.3"
 	}
 }

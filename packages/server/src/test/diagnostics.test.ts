@@ -50,6 +50,12 @@ describe('undefined names', () => {
         ['2:9 \'z\' is not defined.']);
   });
 
+  it('reports Error and Future, which are only in the error and async modules', async () => {
+    assert.deepEqual(
+        await problems('raise Error(\'x\')', 'f = Future'),
+        ['1:7 \'Error\' is not defined.', '2:5 \'Future\' is not defined.']);
+  });
+
   it('accepts builtins and names defined later', async () => {
     assert.deepEqual(
         await problems(

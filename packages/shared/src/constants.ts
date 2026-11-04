@@ -5,7 +5,7 @@ export const ZINNIA_LANGUAGE_ID = 'zinnia';
 export const ZINNIA_LANGUAGE_NAME = 'Zinnia';
 
 export const SERVER_ENTRY_POINT_PATH =
-    path.join('packages', 'server', 'out', 'server.js');
+    path.join('packages', 'server', 'dist', 'server.js');
 
 
 export const ZINNIA_DOCUMENT_SELECTOR: VsCodeDocumentFilter = {
