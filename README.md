@@ -60,8 +60,8 @@ Build the server, then run it over stdio:
 git clone https://github.com/jeffmanzione/zinnia-language-server.git
 cd zinnia-language-server
 npm ci
-npm run compile
-node packages/server/out/server.js --stdio
+npm run bundle
+node packages/server/dist/server.js --stdio
 ```
 
 The server reads one initialization option, `libraryPath`: the directory of
@@ -72,7 +72,7 @@ the standard library to use instead of the bundled one.
 ```lua
 vim.filetype.add({ extension = { zn = 'zinnia' } })
 vim.lsp.config('zinnia', {
-  cmd = { 'node', '/path/to/zinnia-language-server/packages/server/out/server.js', '--stdio' },
+  cmd = { 'node', '/path/to/zinnia-language-server/packages/server/dist/server.js', '--stdio' },
   filetypes = { 'zinnia' },
   root_markers = { '.git' },
 })
@@ -86,7 +86,7 @@ Neovim shows the server's semantic highlighting.
 ```toml
 [language-server.zinnia]
 command = "node"
-args = ["/path/to/zinnia-language-server/packages/server/out/server.js", "--stdio"]
+args = ["/path/to/zinnia-language-server/packages/server/dist/server.js", "--stdio"]
 
 [[language]]
 name = "zinnia"
@@ -120,7 +120,8 @@ library's source, are listed in `packages/server/src/semantics/natives.ts`.
 ```shell
 npm install
 npm test        # compiles and runs the tests
-npm run watch   # recompiles on change
+npm run watch   # rebundles on change, for F5
+npm run bundle  # bundles the client and server into packages/*/dist
 npm run build   # packages the extension as a .vsix
 ```
 
