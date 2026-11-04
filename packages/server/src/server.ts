@@ -8,6 +8,7 @@ import {testLenses} from './codeLens';
 import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
 import {foldingRanges} from './folding';
 import {formatRows, formatText} from './format';
+import {hoverMarkdown} from './hover';
 import {documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from './navigation';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
@@ -97,15 +98,6 @@ function identifierLocations(token: SemanticToken): Location[] {
     }
   }
   return locations;
-}
-
-function hoverText(token: SemanticToken): string {
-  const kind = token.modifiers.includes('defaultLibrary') ? 'module' :
-      token.type === 'property'                         ? 'field' :
-                                                          token.type;
-  const name =
-      token.parentName ? `${token.parentName}.${token.text}` : token.text;
-  return `${kind} \`${name}\``;
 }
 
 // Pushes [tokens] to [builder] and returns it.
@@ -366,7 +358,7 @@ connection.onHover(async (params): Promise<Hover|null> => {
     return null;
   }
   return {
-    contents: {kind: MarkupKind.Markdown, value: hoverText(token)},
+    contents: {kind: MarkupKind.Markdown, value: hoverMarkdown(info!, token, analyzer)},
     range: {
       start: {line: token.row, character: token.col},
       end: {line: token.row, character: token.col + token.text.length},
