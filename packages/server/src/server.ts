@@ -4,14 +4,14 @@ import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {DiagnosticData, quickFixes} from './codeActions';
-import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, signatureInformation} from './completion';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
 import {foldingRanges} from './folding';
 import {formatText} from './format';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
 import {NATIVE_FUNCTIONS, NATIVE_METHODS} from './semantics/natives';
-import {SemanticClass, SemanticToken} from './semantics/semantic';
+import {resolved, SemanticClass, SemanticToken} from './semantics/semantic';
 import {invalidName, renameLocations, renameTarget} from './rename';
 import {documentSymbols, workspaceSymbols} from './symbols';
 
@@ -280,8 +280,26 @@ connection.onReferences(async (params): Promise<Location[]> => {
   if (token === undefined) {
     return [];
   }
-  const locations = identifierLocations(token);
-  return params.context.includeDeclaration ? locations : locations.slice(1);
+  const id = token.identifier && resolved(token.identifier);
+  const declaration = id?.tokens[0];
+  if (id === undefined || declaration === undefined) {
+    return [];
+  }
+  // Uses through `module.name` and `object.name` are found in the analyzed
+  // documents, as for rename.
+  const locations: Location[] = [];
+  for (const loc of renameLocations(
+           {id: id, declaration: declaration, token: token},
+           analyzer.analyzedDocuments())) {
+    const isDeclaration = loc.filePath === declaration.filePath &&
+        loc.row === declaration.token.pos.rowBegin - 1 &&
+        loc.col === declaration.token.pos.columnBegin - 1;
+    const location = locationOf(loc.filePath, loc.row, loc.col, loc.length);
+    if (location !== undefined && (params.context.includeDeclaration || !isDeclaration)) {
+      locations.push(location);
+    }
+  }
+  return locations;
 });
 
 connection.onDocumentSymbol(async (params): Promise<DocumentSymbol[]> => {
@@ -309,11 +327,12 @@ function knownClasses(info: SemanticDocInfo): {cls: SemanticClass, text: string}
 }
 
 async function memberCompletions(
-    info: SemanticDocInfo, receiver: string, line: number): Promise<CompletionItem[]> {
+    info: SemanticDocInfo, receiver: string, position: Position):
+    Promise<CompletionItem[]> {
   if (receiver === 'self') {
-    const cls = classAt(info, line);
+    const cls = classAt(info, position.line);
     if (cls !== undefined) {
-      return classMembers(cls, info.text);
+      return typeMembers({name: cls.name.id, cls: cls}, analyzer);
     }
   }
   const imprt = info.module?.imports.find(i => i.name.id === receiver);
@@ -321,6 +340,11 @@ async function memberCompletions(
     const module = await analyzer.importedModule(info.path, imprt);
     return module === undefined ? [] :
                                   moduleMembers(module, moduleNameOf(imprt.ast), analyzer);
+  }
+  const type = receiverType(
+      info, receiver, position.line, position.character, analyzer);
+  if (type !== undefined) {
+    return typeMembers(type, analyzer);
   }
   // The receiver's class isn't known, so offer the members of all known
   // classes.
@@ -353,7 +377,7 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     const access =
         memberAccessAt(document.getText(), document.offsetAt(params.position));
     if (access !== undefined) {
-      return memberCompletions(info, access.receiver, params.position.line);
+      return memberCompletions(info, access.receiver, params.position);
     }
   }
   const items = new Map<string, CompletionItem>();
@@ -373,7 +397,8 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
 
 async function signatureFor(
     info: SemanticDocInfo, receiver: string|undefined, name: string,
-    line: number): Promise<SignatureInformation|undefined> {
+    position: Position): Promise<SignatureInformation|undefined> {
+  const line = position.line;
   const methodOf = (cls: SemanticClass|undefined, text: string) => {
     const method = cls?.methods.get(name);
     if (method !== undefined) {
@@ -386,7 +411,7 @@ async function signatureFor(
   if (receiver === 'self') {
     const cls = classAt(info, line);
     if (cls !== undefined) {
-      return methodOf(cls, info.text);
+      return typeMethodSignature({name: cls.name.id, cls: cls}, name, analyzer);
     }
     // At the top level, `self` is the module.
     receiver = undefined;
@@ -402,6 +427,11 @@ async function signatureFor(
       }
       const native = NATIVE_FUNCTIONS[moduleNameOf(imprt.ast) ?? '']?.[name];
       return native && nativeSignature(name, native);
+    }
+    const type =
+        receiverType(info, receiver, line, position.character, analyzer);
+    if (type !== undefined) {
+      return typeMethodSignature(type, name, analyzer);
     }
     // The receiver's class isn't known: use the first known class with a
     // method of this name, then the first native one.
@@ -450,7 +480,7 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
   }
   const call = callAt(document.getText(), document.offsetAt(params.position));
   const signature = call &&
-      await signatureFor(info, call.receiver, call.name, params.position.line);
+      await signatureFor(info, call.receiver, call.name, params.position);
   if (signature === undefined) {
     return null;
   }
