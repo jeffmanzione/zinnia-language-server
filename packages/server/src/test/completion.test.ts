@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import {describe, it} from 'node:test';
 
-import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, signatureInformation} from '../completion';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, signatureInformation, unimportedModuleItems, unimportedModuleMembers} from '../completion';
 import {SemanticAnalyzer} from '../semantics/analyzer';
 import {NATIVE_METHODS} from '../semantics/natives';
 
@@ -128,5 +128,42 @@ describe('native members and aliases', () => {
     const items = moduleMembers(builtin, 'builtin', analyzer);
     assert.equal(items.find(i => i.label === 'sort')?.detail, 'sort(seq, cmp = 1)');
     assert.equal(items.find(i => i.label === 'Int')?.detail, 'Int(x)');
+  });
+});
+
+describe('auto-import', () => {
+  const LIBS = [
+    {name: 'builtin', path: '/stdlib/builtin.zn', text: 'import io\nfunction cat(args) args\n'},
+    {name: 'io', path: '/stdlib/io.zn', text: 'function println(a) a\n'},
+    {name: 'json', path: '/stdlib/json.zn', text: 'function jsonify(v) v\nfunction _helper(v) v\n'},
+    {name: 'net', path: '/stdlib/net.zn', text: 'class Socket {}\n'},
+  ];
+
+  async function analyze(text: string) {
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([], async () => LIBS);
+    const info = await analyzer.parseDocument({textDocument: {uri: 'file:///auto.zn'}, text: text});
+    return {analyzer, info};
+  }
+
+  it('offers modules that aren\'t imported, importing them after the imports', async () => {
+    const {analyzer, info} = await analyze('import net\nx = 1\n');
+    const items = unimportedModuleItems(info, analyzer);
+    // builtin's io is already visible; net is imported.
+    assert.deepEqual(items.map(i => i.label), ['json']);
+    assert.deepEqual(items[0].additionalTextEdits, [{
+      range: {start: {line: 1, character: 0}, end: {line: 1, character: 0}},
+      newText: 'import json\n',
+    }]);
+  });
+
+  it('completes members of a module that isn\'t imported', async () => {
+    const {analyzer, info} = await analyze('x = json.\n');
+    const items = unimportedModuleMembers(info, 'json', analyzer)!;
+    assert.deepEqual(items.map(i => [i.label, i.sortText]), [['jsonify', undefined], ['_helper', '~_helper']]);
+    assert.equal(items[0].additionalTextEdits![0].newText, 'import json\n');
+    // A name the document defines isn't a module to import.
+    const shadowed = await analyze('json = 1\nx = json.\n');
+    assert.equal(unimportedModuleMembers(shadowed.info, 'json', shadowed.analyzer), undefined);
   });
 });

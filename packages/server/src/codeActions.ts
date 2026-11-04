@@ -14,7 +14,7 @@ export interface DiagnosticData {
 
 // The row after the document's imports, where a new import goes: after the
 // last top-level import, or at the start.
-function importRow(info: SemanticDocInfo): number {
+export function importRow(info: SemanticDocInfo): number {
   let row = 0;
   for (const imprt of info.module?.imports ?? []) {
     row = Math.max(row, imprt.ast.importTok.pos.rowBegin);

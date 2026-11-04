@@ -155,6 +155,22 @@ export class SemanticAnalyzer {
         .find(filePath => this.docs_.has(filePath) || existsSync(filePath));
   }
 
+  // The names of the modules the file at [fromPath] can import by name: the
+  // standard library's, except builtin, which every module sees, and the
+  // workspace files in a workspace folder or next to it.
+  importableModules(fromPath: string): string[] {
+    const names = new Set(
+        [...this.libNamesToFilePaths_.keys()].filter(n => n !== 'builtin'));
+    const dirs = new Set([...this.workspacePaths_, path.dirname(fromPath)]);
+    for (const filePath of this.docs_.keys()) {
+      if (filePath !== fromPath && filePath.endsWith('.zn') &&
+          dirs.has(path.dirname(filePath)) && !this.isStandardLibraryFile(filePath)) {
+        names.add(path.basename(filePath, '.zn'));
+      }
+    }
+    return [...names].filter(n => /^[A-Za-z_$][\w$]*$/.test(n)).sort();
+  }
+
   // Whether the file at [fromPath] can import a module named [name].
   isImportable(fromPath: string, name: string): boolean {
     return this.libNamesToFilePaths_.has(name) ||

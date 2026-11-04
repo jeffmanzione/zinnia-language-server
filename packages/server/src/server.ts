@@ -5,7 +5,7 @@ import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared
 
 import {DiagnosticData, quickFixes} from './codeActions';
 import {testLenses} from './codeLens';
-import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature, unimportedModuleItems, unimportedModuleMembers} from './completion';
 import {foldingRanges} from './folding';
 import {formatRows, formatText} from './format';
 import {hoverMarkdown} from './hover';
@@ -442,6 +442,25 @@ async function memberCompletions(
     return module === undefined ? [] :
                                   moduleMembers(module, moduleNameOf(imprt.ast), analyzer);
   }
+  // A module seen through another module's import, such as builtin's io.
+  const seen = info.tokens.find(
+      t => t.text === receiver && t.identifier !== undefined &&
+          resolved(t.identifier).importSource !== undefined);
+  const source = seen && resolved(seen.identifier!).importSource!;
+  if (source !== undefined) {
+    const declaration = resolved(seen!.identifier!).tokens[0];
+    const module = analyzer.analyzedImport(
+        declaration?.filePath ?? info.path, source.name, source.isPath);
+    if (module !== undefined) {
+      return moduleMembers(module, source.isPath ? undefined : source.name, analyzer);
+    }
+  }
+  // A module that isn't imported yet: completing one of its members imports
+  // it.
+  const unimported = unimportedModuleMembers(info, receiver, analyzer);
+  if (unimported !== undefined) {
+    return unimported;
+  }
   const type = receiverType(
       info, receiver, position.line, position.character, analyzer);
   if (type !== undefined) {
@@ -491,6 +510,12 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
         COMPLETION_KINDS[token.type];
     if (kind !== undefined && !items.has(token.text)) {
       items.set(token.text, {label: token.text, kind: kind});
+    }
+  }
+  // Modules that aren't imported yet, which completing imports.
+  for (const item of info ? unimportedModuleItems(info, analyzer) : []) {
+    if (!items.has(item.label)) {
+      items.set(item.label, item);
     }
   }
   return [...items.values()];
