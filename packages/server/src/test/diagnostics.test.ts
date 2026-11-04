@@ -26,8 +26,15 @@ before(async () => {
       [{uri: 'file://' + workspace, name: 'workspace'}], async () => LIBS);
 });
 
-// Returns the problems in [lines] as 'row:col message' (1-based).
+// Returns the problems in [lines] as 'row:col message' (1-based), leaving
+// out hints of unused code.
 async function problems(...lines: string[]): Promise<string[]> {
+  return problemsWithHints(...lines).then(
+      ps => ps.filter(p => !/ is (imported|assigned) but never used\.$/.test(p)));
+}
+
+// Returns all the problems in [lines] as 'row:col message' (1-based).
+async function problemsWithHints(...lines: string[]): Promise<string[]> {
   const info = await analyzer.parseDocument({
     textDocument: {uri: 'file://' + path.join(workspace, 'test.zn')},
     text: lines.join('\n') + '\n',
@@ -177,5 +184,43 @@ describe('imports', () => {
           '3:8 Module \'missing\' not found.',
           '4:8 Module \'nowhere/thing\' not found.',
         ]);
+  });
+});
+
+describe('unused and unreachable code', () => {
+  it('reports unused imports and variables of functions', async () => {
+    assert.deepEqual(
+        await problemsWithHints(
+            'import io', 'import async', 'x = 1', 'function f(a) {', '  y = 2',
+            '  _z = 3', '  w = 4', '  return w + a', '}', 'q = async.x'),
+        [
+          '1:8 \'io\' is imported but never used.',
+          '5:3 \'y\' is assigned but never used.',
+        ]);
+  });
+
+  it('allows unused catch variables and loop variables named _', async () => {
+    assert.deepEqual(
+        await problemsWithHints(
+            'function f(m) {', '  try {', '    m()', '  } catch e {', '  }',
+            '  for (_, v) in m {', '    cat(v)', '  }', '}'),
+        []);
+  });
+
+  it('counts uses in lambdas and before the definition', async () => {
+    assert.deepEqual(
+        await problemsWithHints(
+            'function f() {', '  g = () -> later', '  later = 1', '  return g', '}'),
+        []);
+  });
+
+  it('reports code after a return', async () => {
+    const info = await analyzer.parseDocument({
+      textDocument: {uri: 'file://' + path.join(workspace, 'unreachable.zn')},
+      text: 'function f() {\n  return 1\n  cat(2)\n  cat(3)\n}\n',
+    });
+    assert.deepEqual(
+        info.problems.map(p => [p.message, p.row, p.col, p.endRow, p.endCol]),
+        [['Unreachable code.', 2, 2, 3, 8]]);
   });
 });

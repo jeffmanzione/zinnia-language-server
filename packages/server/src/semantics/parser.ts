@@ -22,7 +22,12 @@ export interface ParseProblem {
   col?: number;
   // How many characters the problem spans, if more than one.
   length?: number;
-  severity?: 'error'|'warning';
+  severity?: 'error'|'warning'|'hint';
+  // Where the problem ends, if it spans lines, 0-based.
+  endRow?: number;
+  endCol?: number;
+  // Whether the code is unneeded: unused or unreachable.
+  unnecessary?: boolean;
   // What kind of problem this is, for the problems that have quick fixes.
   code?: string;
   // For a hidden top-level variable: where it's declared, 0-based.

@@ -49,6 +49,8 @@ export class SemanticIdentifier {
   // The values assigned to a variable, field or parameter, from which its
   // class is inferred.
   assignments: SemanticExpression[] = [];
+  // How many times the name is read, as opposed to assigned.
+  reads = 0;
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -89,7 +91,7 @@ export function resolved(id: SemanticIdentifier): SemanticIdentifier {
 // A problem found by the semantic pass. Rows and columns are 0-based.
 export interface SemanticProblem {
   message: string;
-  severity: 'error'|'warning';
+  severity: 'error'|'warning'|'hint';
   row: number;
   col: number;
   length: number;
@@ -97,9 +99,15 @@ export interface SemanticProblem {
   code?: ProblemCode;
   // For a hidden top-level variable: where it's declared, 0-based.
   declaration?: {row: number, col: number};
+  // Where the problem ends, if it spans lines, 0-based.
+  endRow?: number;
+  endCol?: number;
+  // Whether the code is unneeded: unused or unreachable.
+  unnecessary?: boolean;
 }
 
-export type ProblemCode = 'undefined-name'|'hidden-top-level-variable';
+export type ProblemCode = 'undefined-name'|'hidden-top-level-variable'|
+    'unused-import'|'unused-variable'|'unreachable-code';
 
 function hiddenTopLevelVariableProblem(
     use: Token, found: SemanticIdentifier): SemanticProblem {
@@ -120,7 +128,7 @@ function hiddenTopLevelVariableProblem(
 
 function problemAt(
     token: Token, message: string,
-    severity: 'error'|'warning' = 'warning'): SemanticProblem {
+    severity: 'error'|'warning'|'hint' = 'warning'): SemanticProblem {
   return {
     message: message,
     severity: severity,
@@ -412,6 +420,10 @@ class FileState {
   // Whether the file may create classes at runtime (with an annotation or the
   // classes module), so an undefined class name might exist.
   createsClasses = false;
+  // The variables defined in functions and methods, checked for being used.
+  readonly locals: SemanticIdentifier[] = [];
+  // Variables that needn't be used, such as a catch's.
+  readonly mayBeUnused = new Set<SemanticIdentifier>();
 }
 
 // Standard library modules whose annotations create no classes other than the
@@ -450,6 +462,8 @@ class Block {
   readonly inMethod: boolean;
   // The name of the class this block is in, if any.
   readonly classId?: SemanticIdentifier;
+  // Whether this block is in a named function or method.
+  readonly inFunction: boolean;
 
   constructor(
       private readonly analyzer: SemanticAnalyzer,
@@ -457,6 +471,7 @@ class Block {
       options: BlockOptions = {}) {
     this.file = parent?.file ?? new FileState();
     this.classId = options.classId ?? parent?.classId;
+    this.inFunction = kind === 'function' || (parent?.inFunction ?? false);
     this.inheritsUnknownMembers =
         options.inheritsUnknownMembers ?? parent?.inheritsUnknownMembers ?? false;
     this.inMethod = options.inMethod ?? parent?.inMethod ?? false;
@@ -571,6 +586,9 @@ class Block {
 
     const sid = new SemanticIdentifier(ast, type, modifiers, idText);
     this.members.set(sid.id, sid);
+    if (this.inFunction && type === 'variable' && modifiers.includes('local')) {
+      this.file.locals.push(sid);
+    }
     return sid;
   }
 
@@ -1391,6 +1409,7 @@ function processUse(id: IdentifierExpr, context: SemanticContext):
     SemanticIdentifier {
   const identifier = context.block.lookupUse(id.token);
   identifier.addToken(id.token, context.filePath);
+  identifier.reads++;
   return identifier;
 }
 
@@ -1740,10 +1759,117 @@ function processFunction(
   };
 }
 
+// Marks the names a catch assigns, which needn't be used.
+function mayBeUnused(lhs: SemanticAssignLhs, context: SemanticContext): SemanticAssignLhs {
+  const mark = (l: SemanticAssignLhs) => {
+    if (l.expr instanceof SemanticIdentifier) {
+      context.block.file.mayBeUnused.add(l.expr);
+    } else if (Array.isArray(l.expr)) {
+      l.expr.forEach(mark);
+    }
+  };
+  mark(lhs);
+  return lhs;
+}
+
+// The first and last tokens of a syntax tree node.
+function tokenSpan(node: unknown): [Token, Token]|undefined {
+  let first: Token|undefined, last: Token|undefined;
+  const visit = (value: unknown) => {
+    if (value === null || typeof value !== 'object') {
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const obj = value as Record<string, unknown>;
+    if ('pos' in obj && typeof obj.kind === 'number') {
+      const token = obj as unknown as Token;
+      if (first === undefined || token.pos.index < first.pos.index) {
+        first = token;
+      }
+      if (last === undefined || token.pos.index > last.pos.index) {
+        last = token;
+      }
+      return;
+    }
+    for (const key in obj) {
+      visit(obj[key]);
+    }
+  };
+  visit(node);
+  return first && last && [first, last];
+}
+
+// Reports the statements of a block after one that always leaves it: a
+// return, break, continue, raise or exit.
+function checkReachable(stat: CompoundStat, context: SemanticContext): void {
+  const leaves = stat.stats.findIndex(
+      s => s.kind === 'JumpStat' || s.kind === 'RaiseStat' || s.kind === 'ExitStat');
+  if (leaves < 0 || leaves === stat.stats.length - 1) {
+    return;
+  }
+  const start = tokenSpan(stat.stats[leaves + 1]);
+  const end = tokenSpan(stat.stats[stat.stats.length - 1]);
+  if (start === undefined || end === undefined) {
+    return;
+  }
+  const [first] = start;
+  const [, last] = end;
+  context.block.file.problems.push({
+    message: 'Unreachable code.',
+    severity: 'hint',
+    row: first.pos.rowBegin - 1,
+    col: first.pos.columnBegin - 1,
+    length: first.text.length,
+    endRow: last.pos.rowEnd - 1,
+    endCol: last.pos.columnEnd - 1,
+    code: 'unreachable-code',
+    unnecessary: true,
+  });
+}
+
+// Reports imports and the variables of functions and methods that are never
+// read. Names starting with _ are allowed to be unused.
+function checkUnused(
+    file: FileState, module: SemanticModule, analyzer: SemanticAnalyzer,
+    filePath: string): void {
+  if (analyzer.isStandardLibraryFile(filePath)) {
+    return;
+  }
+  for (const imprt of module.imports) {
+    const id = resolved(imprt.name);
+    const token = imprt.ast.name?.token ?? imprt.ast.source.token;
+    if (id.reads === 0 && !id.id.startsWith('_')) {
+      file.problems.push({
+        ...problemAt(token, `'${id.id}' is imported but never used.`, 'hint'),
+        code: 'unused-import',
+        unnecessary: true,
+      });
+    }
+  }
+  for (const local of file.locals) {
+    const id = resolved(local);
+    const declaration = id.tokens[0];
+    if (id !== local || id.reads > 0 || id.id.startsWith('_') ||
+        file.mayBeUnused.has(id) || declaration === undefined ||
+        declaration.filePath !== filePath) {
+      continue;
+    }
+    file.problems.push({
+      ...problemAt(declaration.token, `'${id.id}' is assigned but never used.`, 'hint'),
+      code: 'unused-variable',
+      unnecessary: true,
+    });
+  }
+}
+
 function processStatement(
     stat: Statement, context: SemanticContext): SemanticStatement {
   if (stat.kind === 'CompoundStat') {
     const newContext = context.newBlock();
+    checkReachable(stat, context);
     return {
       ast: stat,
       stats: stat.stats.map(s => processStatement(s, newContext))
@@ -1794,7 +1920,7 @@ function processStatement(
     return {
       ast: stat,
       tryStat: processStatement(stat.stat, tryContext),
-      catchAssign: processAssignLhs(stat.catchAssign, catchContext),
+      catchAssign: mayBeUnused(processAssignLhs(stat.catchAssign, catchContext), catchContext),
       catchStat: processStatement(stat.catchStat, catchContext)
     };
   } else if (stat.kind === 'RaiseStat') {
@@ -2047,6 +2173,7 @@ function resolveUnresolvedNames(
     if (found !== undefined && found.id !== unresolved.id) {
       unresolved.id.forward = found.id;
       found.id.tokens.push(...unresolved.id.tokens);
+      found.id.reads += unresolved.id.reads;
       if (isHiddenTopLevelVariable(found)) {
         for (const use of unresolved.uses) {
           file.problems.push(hiddenTopLevelVariableProblem(use, found.id));
@@ -2105,6 +2232,7 @@ export function generateSemanticTokens(
   const file = context.block.file;
   resolveUnresolvedNames(file, analyzer, filePath);
   checkCalls(file);
+  checkUnused(file, semanticModule, analyzer, filePath);
   generatTokensForModule(semanticModule, context, generator);
   return [context, semanticModule, generator.finalizeTokens(), file.problems];
 }

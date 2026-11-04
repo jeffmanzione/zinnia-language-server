@@ -1,4 +1,4 @@
-import {CodeAction, CodeActionKind, CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CodeAction, CodeActionKind, DiagnosticTag, CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
@@ -293,13 +293,17 @@ function publishDiagnostics(document: TextDocument, info: SemanticDocInfo): void
         {line: problem.row, character: problem.col ?? 0};
     return {
       severity: problem.severity === 'warning' ? DiagnosticSeverity.Warning :
+          problem.severity === 'hint'          ? DiagnosticSeverity.Hint :
                                                  DiagnosticSeverity.Error,
       range: {
         start: start,
-        end: {...start, character: start.character + (problem.length ?? 1)}
+        end: problem.endRow !== undefined ?
+            {line: problem.endRow, character: problem.endCol ?? 0} :
+            {...start, character: start.character + (problem.length ?? 1)},
       },
       message: problem.message,
       source: 'zinnia',
+      tags: problem.unnecessary ? [DiagnosticTag.Unnecessary] : undefined,
       code: problem.code,
       data: problem.declaration === undefined ?
           undefined :
@@ -746,8 +750,28 @@ connection.onCodeAction(async (params): Promise<CodeAction[]> => {
   return quickFixes(
       info, params.textDocument.uri,
       params.context.diagnostics.filter(d => d.source === 'zinnia'),
-      name => analyzer.isImportable(info.path, name));
+      {
+        isModule: name => analyzer.isImportable(info.path, name),
+        names: () => visibleNames(info),
+      });
 });
+
+// The names a misspelled name may have meant: those the document uses or
+// defines at the top level, and builtin's.
+function visibleNames(info: SemanticDocInfo): string[] {
+  const names = new Set<string>();
+  for (const token of info.tokens) {
+    if (token.identifier !== undefined) {
+      names.add(token.text);
+    }
+  }
+  for (const doc of [info, analyzer.lookupDocInfoFromModuleName('builtin')]) {
+    for (const id of doc?.context?.block.definitions() ?? []) {
+      names.add(id.id);
+    }
+  }
+  return [...names];
+}
 
 documents.listen(connection);
 connection.listen();
