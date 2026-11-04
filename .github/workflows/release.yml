@@ -1,0 +1,106 @@
+# Releases a version of the extension: tags a commit whose package.json has
+# the version, builds and tests it, publishes a GitHub release with the
+# .vsix, and publishes it to the VS Code Marketplace and Open VSX when their
+# tokens are set up.
+#
+# Run it from the Actions tab (or `gh workflow run release.yml -f version=X.Y.Z`).
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, e.g. 1.2.3
+        required: true
+      dry_run:
+        description: Build, test and package without tagging or publishing
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ inputs.version }}
+      VSIX: zinnia-language-${{ inputs.version }}.vsix
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Check version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Version must look like 1.2.3, got '$VERSION'."
+            exit 1
+          fi
+          if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
+            echo "::error::Tag v$VERSION already exists."
+            exit 1
+          fi
+          echo "Releasing $VERSION from $GITHUB_SHA."
+
+      # The branch keeps version 0.0.0; only the tagged commit has the version.
+      - name: Make release commit
+        run: |
+          npm version "$VERSION" --no-git-tag-version
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $VERSION"
+          git tag -a "v$VERSION" -m "Zinnia language support $VERSION"
+
+      - name: Build and test
+        run: |
+          npm ci
+          npm test
+
+      - name: Package
+        run: npx --yes @vscode/vsce@4.0.0 package --follow-symlinks --out "$VSIX"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.VSIX }}
+          path: ${{ env.VSIX }}
+
+      - name: Publish GitHub release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" "$VSIX" \
+            --title "$VERSION" --generate-notes --verify-tag
+
+      # Needs a VSCE_PAT secret: an Azure DevOps personal access token with
+      # the Marketplace (Manage) scope, for the extension's publisher.
+      - name: Publish to the VS Code Marketplace
+        if: ${{ !inputs.dry_run }}
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: |
+          if [[ -z "$VSCE_PAT" ]]; then
+            echo "::notice::No VSCE_PAT secret; not publishing to the VS Code Marketplace."
+            exit 0
+          fi
+          npx --yes @vscode/vsce@4.0.0 publish --packagePath "$VSIX"
+
+      # Needs an OVSX_PAT secret: an access token from open-vsx.org, whose
+      # namespace matches the extension's publisher.
+      - name: Publish to Open VSX
+        if: ${{ !inputs.dry_run }}
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        run: |
+          if [[ -z "$OVSX_PAT" ]]; then
+            echo "::notice::No OVSX_PAT secret; not publishing to Open VSX."
+            exit 0
+          fi
+          npx --yes ovsx@1.2.0 publish "$VSIX" --pat "$OVSX_PAT"
