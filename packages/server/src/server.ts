@@ -6,7 +6,8 @@ import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared
 import {DiagnosticData, quickFixes} from './codeActions';
 import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
 import {foldingRanges} from './folding';
-import {formatText} from './format';
+import {formatRows, formatText} from './format';
+import {documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from './navigation';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
@@ -106,10 +107,12 @@ function hoverText(token: SemanticToken): string {
   return `${kind} \`${name}\``;
 }
 
-function encodeTokens(tokens: SemanticToken[]): SemanticTokens {
+// Pushes [tokens] to [builder] and returns it.
+function encodeTokens(
+    tokens: SemanticToken[],
+    builder = new SemanticTokensBuilder()): SemanticTokensBuilder {
   // Tokens must be sent in document order, once per position.
   const sorted = tokens.slice().sort((a, b) => a.row - b.row || a.col - b.col);
-  const builder = new SemanticTokensBuilder();
   let lastRow = -1, lastCol = -1;
   for (const token of sorted) {
     if (token.row === lastRow && token.col === lastCol) {
@@ -125,7 +128,7 @@ function encodeTokens(tokens: SemanticToken[]): SemanticTokens {
         token.row, token.col, token.text.length,
         tokenTypeIndices.get(token.type) ?? 0, modifiers);
   }
-  return builder.build();
+  return builder;
 }
 
 // Reads the standard library from the configured directory, or the bundled
@@ -168,7 +171,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
           tokenTypes: ZINNIA_TOKEN_TYPES,
           tokenModifiers: ZINNIA_TOKEN_MODIFIERS,
         },
-        full: true,
+        full: {delta: true},
+        range: true,
       },
       hoverProvider: true,
       definitionProvider: true,
@@ -178,6 +182,11 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       renameProvider: {prepareProvider: true},
       foldingRangeProvider: true,
       documentFormattingProvider: true,
+      documentRangeFormattingProvider: true,
+      documentOnTypeFormattingProvider: {firstTriggerCharacter: '}', moreTriggerCharacter: [')', ']']},
+      documentHighlightProvider: true,
+      callHierarchyProvider: true,
+      inlayHintProvider: true,
       codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
@@ -302,15 +311,46 @@ function publishDiagnostics(document: TextDocument, info: SemanticDocInfo): void
 
 documents.onDidClose(event => {
   analyses.delete(event.document.uri);
+  tokenBuilders.delete(event.document.uri);
   // Once closed, it's analyzed from disk again, and so are the files that
   // import it.
   refreshOpenDocuments(analyzer.setOpen(filePathOf(event.document.uri), false));
   connection.sendDiagnostics({uri: event.document.uri, diagnostics: []});
 });
 
+// The last semantic tokens sent for each document, for sending the next ones
+// as edits.
+const tokenBuilders = new Map<string, SemanticTokensBuilder>();
+
 connection.languages.semanticTokens.on(async params => {
   const info = await analysisFor(params.textDocument.uri);
-  return encodeTokens(info?.tokens ?? []);
+  const builder = encodeTokens(info?.tokens ?? []);
+  tokenBuilders.set(params.textDocument.uri, builder);
+  return builder.build();
+});
+
+connection.languages.semanticTokens.onDelta(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  let builder = tokenBuilders.get(params.textDocument.uri);
+  if (builder === undefined) {
+    builder = encodeTokens(info?.tokens ?? []);
+    tokenBuilders.set(params.textDocument.uri, builder);
+    return builder.build();
+  }
+  builder.previousResult(params.previousResultId);
+  encodeTokens(info?.tokens ?? [], builder);
+  return builder.buildEdits();
+});
+
+connection.languages.semanticTokens.onRange(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  const {start, end} = params.range;
+  return encodeTokens((info?.tokens ?? []).filter(
+                          t => (t.row > start.line ||
+                                (t.row === start.line && t.col >= start.character)) &&
+                              (t.row < end.line ||
+                               (t.row === end.line && t.col < end.character))))
+      .build();
 });
 
 connection.onHover(async (params): Promise<Hover|null> => {
@@ -638,6 +678,64 @@ connection.onDocumentFormatting(params => {
     range: {start: {line: 0, character: 0}, end: document.positionAt(text.length)},
     newText: formatted,
   }];
+});
+
+// Edits that replace whole lines of [document], keeping their line ends.
+function lineEdits(edits: {row: number, newText: string}[], document: TextDocument): TextEdit[] {
+  const lines = document.getText().split(/\r?\n/);
+  return edits.map(edit => ({
+    range: {
+      start: {line: edit.row, character: 0},
+      end: {line: edit.row, character: lines[edit.row].length},
+    },
+    newText: edit.newText,
+  }));
+}
+
+connection.onDocumentRangeFormatting(params => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return [];
+  }
+  return lineEdits(
+      formatRows(document.getText(), params.options, params.range.start.line,
+                 params.range.end.line),
+      document);
+});
+
+// Re-indents a line once its closing bracket is typed.
+connection.onDocumentOnTypeFormatting(params => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return [];
+  }
+  const line = params.position.line;
+  return lineEdits(formatRows(document.getText(), params.options, line, line), document);
+});
+
+connection.onDocumentHighlight(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ? [] :
+                              documentHighlights(info, tokenAt(info, params.position));
+});
+
+connection.languages.callHierarchy.onPrepare(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ? [] :
+                              prepareCallHierarchy(tokenAt(info, params.position), analyzer);
+});
+
+connection.languages.callHierarchy.onIncomingCalls(
+    params => incomingCalls(params.item, analyzer));
+
+connection.languages.callHierarchy.onOutgoingCalls(
+    params => outgoingCalls(params.item, analyzer));
+
+connection.languages.inlayHint.on(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ?
+      [] :
+      inlayHints(info, params.range.start.line, params.range.end.line, analyzer);
 });
 
 connection.onCodeAction(async (params): Promise<CodeAction[]> => {
