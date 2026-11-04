@@ -3,7 +3,7 @@
 	"description": "Language support for Zinnia: highlighting, diagnostics, navigation, completion, refactoring and formatting",
 	"author": "Jeff Manzione",
 	"license": "MIT",
-	"version": "0.0.0",
+	"version": "1.1.0",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
