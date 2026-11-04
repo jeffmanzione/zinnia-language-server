@@ -167,9 +167,13 @@ export class SemanticAnalyzer {
   // Returns the number of files analyzed.
   async indexWorkspace(): Promise<number> {
     await this.initPromise_;
+    return this.indexDirs_(this.workspacePaths_);
+  }
+
+  private async indexDirs_(dirs: string[]): Promise<number> {
     const done = new Set<string>();
     let count = 0;
-    for (const dir of this.workspacePaths_) {
+    for (const dir of dirs) {
       for (const filePath of findZnFiles(dir)) {
         if (!done.has(filePath)) {
           count += this.indexFile_(filePath, new Set(), done);
@@ -217,52 +221,87 @@ export class SemanticAnalyzer {
 
   // Records whether the editor has [filePath] open. Once it's closed, its
   // analysis is of its text on disk again.
-  setOpen(filePath: string, open: boolean): void {
+  setOpen(filePath: string, open: boolean): string[] {
     if (open) {
       this.openFiles_.add(filePath);
-    } else if (this.openFiles_.delete(filePath)) {
-      this.refreshFile(filePath);
+      return [];
     }
+    return this.openFiles_.delete(filePath) ? this.refreshFile(filePath) : [];
   }
 
   // Reanalyzes [filePath], unless it's open, after it changed on disk, and the
-  // workspace files that import it.
-  refreshFile(filePath: string): void {
+  // workspace files that import it. Returns the paths of the files
+  // reanalyzed.
+  refreshFile(filePath: string): string[] {
     if (this.isStandardLibraryFile(filePath)) {
-      return;
+      return [];
     }
+    const reanalyzed: string[] = [];
     if (!this.openFiles_.has(filePath)) {
       let text: string;
       try {
         text = readFileSync(filePath, 'utf8');
       } catch {
-        this.forgetFile(filePath);
-        return;
+        return this.forgetFile(filePath);
       }
       this.parseDocumentText_(filePath, text);
+      reanalyzed.push(filePath);
     }
-    this.reanalyzeImportersOf_(filePath);
+    return [...reanalyzed, ...this.reanalyzeImportersOf(filePath)];
   }
 
   // Forgets [filePath], which was deleted, and reanalyzes the workspace files
-  // that import it.
-  forgetFile(filePath: string): void {
+  // that import it. Returns the paths of the files reanalyzed.
+  forgetFile(filePath: string): string[] {
     if (this.openFiles_.has(filePath)) {
-      return;
+      return [];
     }
     this.forgetOccurrencesIn_(filePath);
-    if (this.docs_.delete(filePath)) {
-      this.reanalyzeImportersOf_(filePath);
-    }
+    return this.docs_.delete(filePath) ? this.reanalyzeImportersOf(filePath) :
+                                         [];
   }
 
-  private reanalyzeImportersOf_(filePath: string): void {
-    for (const doc of [...this.docs_.values()]) {
-      if (doc.path !== filePath && !this.isStandardLibraryFile(doc.path) &&
-          importsIn(doc.text).some(
-              i => this.importCandidates_(doc.path, i.name, i.isPath)
-                       .includes(filePath))) {
-        this.parseDocumentText_(doc.path, doc.text);
+  // The analyzed workspace files that import [filePath].
+  importersOf(filePath: string): SemanticDocInfo[] {
+    return [...this.docs_.values()].filter(
+        doc => doc.path !== filePath && !this.isStandardLibraryFile(doc.path) &&
+            importsIn(doc.text).some(
+                i => this.importCandidates_(doc.path, i.name, i.isPath)
+                         .includes(filePath)));
+  }
+
+  // Reanalyzes the files that import [filePath], with the text they were last
+  // analyzed with, so that they see its latest analysis. Returns their paths.
+  reanalyzeImportersOf(filePath: string): string[] {
+    const importers = this.importersOf(filePath);
+    for (const doc of importers) {
+      this.parseDocumentText_(doc.path, doc.text);
+    }
+    return importers.map(doc => doc.path);
+  }
+
+  // Adds a workspace folder and indexes it. Returns the number of files
+  // analyzed.
+  async addWorkspaceFolder(folder: WorkspaceFolder): Promise<number> {
+    const dir = filePathOf(folder.uri);
+    if (this.workspacePaths_.includes(dir)) {
+      return 0;
+    }
+    this.workspacePaths_.push(dir);
+    return this.indexDirs_([dir]);
+  }
+
+  // Removes a workspace folder, forgetting the files in it that aren't open.
+  removeWorkspaceFolder(folder: WorkspaceFolder): void {
+    const dir = filePathOf(folder.uri);
+    this.workspacePaths_ = this.workspacePaths_.filter(p => p !== dir);
+    const prefix = dir.endsWith('/') ? dir : dir + '/';
+    for (const filePath of [...this.docs_.keys()]) {
+      if (filePath.startsWith(prefix) && !this.openFiles_.has(filePath) &&
+          !this.isStandardLibraryFile(filePath) &&
+          !this.workspacePaths_.some(p => filePath.startsWith(p + '/'))) {
+        this.forgetOccurrencesIn_(filePath);
+        this.docs_.delete(filePath);
       }
     }
   }

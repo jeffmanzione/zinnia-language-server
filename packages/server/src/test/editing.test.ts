@@ -3,7 +3,7 @@ import {before, describe, it} from 'node:test';
 
 import {Diagnostic, DiagnosticSeverity} from 'vscode-languageserver/node';
 
-import {quickFixes} from '../codeActions';
+import {editDistance, quickFixes, similarNames} from '../codeActions';
 import {foldingRanges} from '../folding';
 import {formatText} from '../format';
 import {SemanticAnalyzer} from '../semantics/analyzer';
@@ -129,15 +129,18 @@ describe('quick fixes', () => {
       code: p.code,
       data: p.declaration && {declaration: p.declaration},
     }));
-    return quickFixes(info, uri, diagnostics, name => analyzer.isImportable(info.path, name))
+    return quickFixes(info, uri, diagnostics, {
+             isModule: name => analyzer.isImportable(info.path, name),
+             names: () => ['println', 'limit', 'counter', 'count'],
+           })
         .map(a => [a.title, JSON.stringify(a.edit!.changes![uri])]);
   }
 
   it('imports a missing module', async () => {
-    assert.deepEqual(await fixes('import net', 'io.println(1)', 'x = other.y'), [[
+    assert.deepEqual(await fixes('io.println(1)', 'x = other.y'), [[
       'Import \'io\'',
       JSON.stringify([{
-        range: {start: {line: 1, character: 0}, end: {line: 1, character: 0}},
+        range: {start: {line: 0, character: 0}, end: {line: 0, character: 0}},
         newText: 'import io\n',
       }]),
     ]]);
@@ -151,5 +154,55 @@ describe('quick fixes', () => {
         newText: 'self.',
       }]),
     ]]);
+  });
+});
+
+describe('more quick fixes', () => {
+  const LIBS = [
+    {name: 'builtin', path: '/stdlib/builtin.zn', text: 'function cat(args) args\n'},
+    {name: 'io', path: '/stdlib/io.zn', text: 'function println(a) a\n'},
+  ];
+
+  async function fixes(...lines: string[]) {
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([], async () => LIBS);
+    const uri = 'file:///more_fixes.zn';
+    const info = await analyzer.parseDocument({textDocument: {uri}, text: lines.join('\n') + '\n'});
+    const diagnostics: Diagnostic[] = info.problems.map(p => ({
+      range: {
+        start: {line: p.row!, character: p.col!},
+        end: {line: p.row!, character: p.col! + (p.length ?? 1)},
+      },
+      message: p.message,
+      code: p.code,
+    }));
+    return quickFixes(info, uri, diagnostics, {
+             isModule: name => analyzer.isImportable(info.path, name),
+             names: () => ['counter', 'count', 'cat', 'limit'],
+           })
+        .map(a => a.title);
+  }
+
+  it('removes an unused import', async () => {
+    assert.deepEqual(await fixes('import io', 'x = 1'), ['Remove unused import \'io\'']);
+  });
+
+  it('suggests similar names for an undefined one', async () => {
+    assert.deepEqual(
+        await fixes('counter = 1', 'x = countr + 1'),
+        ['Change to \'count\'', 'Change to \'counter\'']);
+  });
+});
+
+describe('similar names', () => {
+  it('measures edits, counting a swap as one', () => {
+    assert.equal(editDistance('count', 'count'), 0);
+    assert.equal(editDistance('cuont', 'count'), 1);
+    assert.equal(editDistance('cnt', 'count'), 2);
+  });
+
+  it('allows more edits for longer names', () => {
+    assert.deepEqual(similarNames('lst', ['list', 'last', 'lots']), ['last', 'list']);
+    assert.deepEqual(similarNames('printn', ['println', 'print', 'sprint']), ['print', 'println', 'sprint']);
   });
 });

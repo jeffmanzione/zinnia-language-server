@@ -155,3 +155,26 @@ export function formatLines(text: string, options: FormatOptions): string[] {
 export function formatText(text: string, options: FormatOptions): string {
   return formatLines(text, options).join(text.includes('\r\n') ? '\r\n' : '\n');
 }
+
+// A replacement of one line, 0-based.
+export interface LineEdit {
+  row: number;
+  newText: string;
+}
+
+// Returns the edits that format rows [firstRow] to [lastRow] of [text],
+// indenting them as formatting the whole text would.
+export function formatRows(
+    text: string, options: FormatOptions, firstRow: number,
+    lastRow: number): LineEdit[] {
+  const before = text.split(/\r?\n/);
+  const after = formatLines(text, options);
+  const edits: LineEdit[] = [];
+  for (let row = firstRow; row <= Math.min(lastRow, before.length - 1, after.length - 1);
+       row++) {
+    if (before[row] !== after[row]) {
+      edits.push({row: row, newText: after[row]});
+    }
+  }
+  return edits;
+}

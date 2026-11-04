@@ -1,15 +1,19 @@
 {
 	"name": "zinnia-language",
-	"description": "Zinnia Lanugage Support",
+	"description": "Language support for Zinnia: highlighting, diagnostics, navigation, completion, refactoring and formatting",
 	"author": "Jeff Manzione",
 	"license": "MIT",
-	"version": "1.0.2",
+	"version": "0.0.0",
 	"repository": {
 		"type": "git",
 		"url": "https://github.com/jeffmanzione/zinnia-language-server"
 	},
 	"publisher": "jeffmanzione",
-	"categories": [],
+	"categories": [
+		"Programming Languages",
+		"Linters",
+		"Formatters"
+	],
 	"keywords": [
 		"multi-root ready"
 	],
@@ -35,6 +39,21 @@
 				"configuration": "./packages/shared/src/language-configuration.json"
 			}
 		],
+		"commands": [
+			{
+				"command": "zinnia.runFile",
+				"title": "Run File",
+				"category": "Zinnia"
+			}
+		],
+		"menus": {
+			"commandPalette": [
+				{
+					"command": "zinnia.runFile",
+					"when": "editorLangId == zinnia"
+				}
+			]
+		},
 		"configurationDefaults": {
 			"[zinnia]": {
 				"editor.tabSize": 2,
@@ -69,6 +88,12 @@
 					"default": "off",
 					"description": "Traces the communication between VS Code and the language server."
 				},
+				"zinnia.executable": {
+					"scope": "machine-overridable",
+					"type": "string",
+					"default": "zinnia",
+					"description": "The zinnia executable that the Run tests lens runs files with."
+				},
 				"zinnia.libraryPath": {
 					"scope": "machine-overridable",
 					"type": "string",
@@ -81,7 +106,7 @@
 	"scripts": {
 		"vscode:prepublish": "npm run compile",
 		"compile": "npx tsc -b",
-		"build": "npx vsce package --follow-symlinks",
+		"build": "npx --yes @vscode/vsce@4.0.0 package --follow-symlinks",
 		"watch": "npx tsc -b -w",
 		"test": "npm run compile && node --test \"packages/server/out/test/**/*.test.js\""
 	},

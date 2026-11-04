@@ -1,0 +1,60 @@
+# Keeps the bundled copy of the Zinnia standard library in sync with zinnia:
+# each week, copies zinnia/lib from jeffmanzione/zinnia's master branch and,
+# if it changed and the tests still pass, opens a pull request.
+#
+# GitHub doesn't run other workflows on pull requests that a workflow opens
+# with its own token, so this runs the tests itself. Opening the pull request
+# needs "Allow GitHub Actions to create and approve pull requests" in the
+# repository's Settings > Actions > General.
+name: Update standard library
+
+on:
+  schedule:
+    - cron: '17 15 * * 1'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Commit, branch or tag of jeffmanzione/zinnia
+        default: master
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Copy the standard library
+        id: update
+        run: |
+          scripts/update-stdlib.sh "${{ inputs.ref || 'master' }}"
+          # Also catches modules that zinnia added, which git diff wouldn't.
+          if [[ -z "$(git status --porcelain -- packages/server/stdlib)" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "commit=$(cat packages/server/stdlib/ZINNIA_COMMIT)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and test
+        if: steps.update.outputs.changed == 'true'
+        run: |
+          npm ci
+          npm test
+
+      - uses: peter-evans/create-pull-request@v7
+        if: steps.update.outputs.changed == 'true'
+        with:
+          branch: update-stdlib
+          commit-message: Update the bundled standard library to zinnia ${{ steps.update.outputs.commit }}
+          title: Update the bundled standard library
+          body: |
+            Copies `zinnia/lib` from jeffmanzione/zinnia@${{ steps.update.outputs.commit }} into `packages/server/stdlib`, with `scripts/update-stdlib.sh`. The tests pass with it.

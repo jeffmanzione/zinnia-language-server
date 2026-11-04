@@ -9,7 +9,7 @@ import {CompletionItem, CompletionItemKind, ParameterInformation, SignatureInfor
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ParamExpr} from './semantics/expressions';
 import {NATIVE_CLASSES, NATIVE_FUNCTIONS, nativeMethodsOf} from './semantics/natives';
-import {SemanticClass, SemanticIdentifier, Signature} from './semantics/semantic';
+import {classChain, inferType, InferredType, SemanticClass, SemanticIdentifier, Signature} from './semantics/semantic';
 
 // A member access being typed: `receiver.prefix`.
 export interface MemberAccess {
@@ -261,4 +261,77 @@ export function classAt(info: SemanticDocInfo, line: number): SemanticClass|
     const last = (cls.ast.rbrace ?? cls.ast.name.token).pos.rowEnd - 1;
     return line >= first && line <= last;
   });
+}
+
+// Infers the class of [receiver], a name used just before [line] and
+// [character], from the last analysis: the nearest earlier use of the name.
+export function receiverType(
+    info: SemanticDocInfo, receiver: string, line: number, character: number,
+    analyzer: SemanticAnalyzer): InferredType|undefined {
+  let nearest: SemanticDocInfo['tokens'][number]|undefined;
+  for (const token of info.tokens) {
+    if (token.text !== receiver || token.identifier === undefined ||
+        token.row > line || (token.row === line && token.col >= character)) {
+      continue;
+    }
+    if (nearest === undefined || token.row > nearest.row ||
+        (token.row === nearest.row && token.col > nearest.col)) {
+      nearest = token;
+    }
+  }
+  return nearest && inferType(nearest.identifier, analyzer);
+}
+
+// The text of the file that defines [cls].
+function textOf(cls: SemanticClass, analyzer: SemanticAnalyzer): string|undefined {
+  const filePath = cls.name.tokens[0]?.filePath;
+  return filePath === undefined ? undefined :
+                                  analyzer.lookupDocInfoFromFile(filePath)?.text;
+}
+
+// The members of a value of [type], including inherited ones.
+export function typeMembers(type: InferredType, analyzer: SemanticAnalyzer):
+    CompletionItem[] {
+  const items = new Map<string, CompletionItem>();
+  if (type.cls !== undefined) {
+    for (const cls of classChain(type.cls, analyzer)) {
+      for (const item of classMembers(cls, textOf(cls, analyzer))) {
+        if (!items.has(item.label)) {
+          items.set(item.label, item);
+        }
+      }
+    }
+  }
+  for (const [name, params] of Object.entries(nativeMethodsOf(type.name))) {
+    if (!items.has(name)) {
+      items.set(name, {
+        label: name,
+        kind: CompletionItemKind.Method,
+        detail: nativeSignature(name, params).label,
+      });
+    }
+  }
+  return [...items.values()];
+}
+
+// Describes the method [name] of a value of [type], if it has one.
+export function typeMethodSignature(
+    type: InferredType, name: string,
+    analyzer: SemanticAnalyzer): SignatureInformation|undefined {
+  if (type.cls !== undefined) {
+    for (const cls of classChain(type.cls, analyzer)) {
+      const method = cls.methods.get(name);
+      if (method !== undefined) {
+        return signatureInformation(
+            name, {params: method.ast.params, isNamed: method.ast.isNamed},
+            textOf(cls, analyzer));
+      }
+      const native = nativeMethodsOfClass(cls)[name];
+      if (native !== undefined) {
+        return nativeSignature(name, native);
+      }
+    }
+  }
+  const native = nativeMethodsOf(type.name)[name];
+  return native && nativeSignature(name, native);
 }

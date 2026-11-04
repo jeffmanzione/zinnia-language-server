@@ -1,6 +1,6 @@
 
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
-import {AddChainExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
+import {AddChainExpr, MemberAccessExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
 import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
 import {NATIVE_CLASSES, NATIVE_FUNCTIONS, NATIVE_METHODS} from './natives';
 import {Token, TokenKind} from './tokenizer';
@@ -44,6 +44,13 @@ export class SemanticIdentifier {
   aliasOf?: {module?: string, name: string};
   // For the name an import defines: the module it imports, as written.
   importSource?: {name: string, isPath: boolean};
+  // For a class's name: the class.
+  cls?: SemanticClass;
+  // The values assigned to a variable, field or parameter, from which its
+  // class is inferred.
+  assignments: SemanticExpression[] = [];
+  // How many times the name is read, as opposed to assigned.
+  reads = 0;
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -84,7 +91,7 @@ export function resolved(id: SemanticIdentifier): SemanticIdentifier {
 // A problem found by the semantic pass. Rows and columns are 0-based.
 export interface SemanticProblem {
   message: string;
-  severity: 'error'|'warning';
+  severity: 'error'|'warning'|'hint';
   row: number;
   col: number;
   length: number;
@@ -92,9 +99,15 @@ export interface SemanticProblem {
   code?: ProblemCode;
   // For a hidden top-level variable: where it's declared, 0-based.
   declaration?: {row: number, col: number};
+  // Where the problem ends, if it spans lines, 0-based.
+  endRow?: number;
+  endCol?: number;
+  // Whether the code is unneeded: unused or unreachable.
+  unnecessary?: boolean;
 }
 
-export type ProblemCode = 'undefined-name'|'hidden-top-level-variable';
+export type ProblemCode = 'undefined-name'|'hidden-top-level-variable'|
+    'unused-import'|'unused-variable'|'unreachable-code';
 
 function hiddenTopLevelVariableProblem(
     use: Token, found: SemanticIdentifier): SemanticProblem {
@@ -115,7 +128,7 @@ function hiddenTopLevelVariableProblem(
 
 function problemAt(
     token: Token, message: string,
-    severity: 'error'|'warning' = 'warning'): SemanticProblem {
+    severity: 'error'|'warning'|'hint' = 'warning'): SemanticProblem {
   return {
     message: message,
     severity: severity,
@@ -250,6 +263,9 @@ interface SemanticPostfix {
   ast: PostfixChainExpr;
   base: SemanticPrimary;
   nestedExprs: (SemanticExpression|Token)[];
+  context: SemanticContext;
+  // For `self.…` in a method: the name of the method's class.
+  selfClass?: SemanticIdentifier;
 }
 
 interface SemanticNamedArg {
@@ -404,6 +420,10 @@ class FileState {
   // Whether the file may create classes at runtime (with an annotation or the
   // classes module), so an undefined class name might exist.
   createsClasses = false;
+  // The variables defined in functions and methods, checked for being used.
+  readonly locals: SemanticIdentifier[] = [];
+  // Variables that needn't be used, such as a catch's.
+  readonly mayBeUnused = new Set<SemanticIdentifier>();
 }
 
 // Standard library modules whose annotations create no classes other than the
@@ -424,6 +444,12 @@ function isHiddenTopLevelVariable(found: ScopedLookup): boolean {
       found.id.type === 'variable' && found.id.modifiers.includes('local');
 }
 
+interface BlockOptions {
+  inheritsUnknownMembers?: boolean;
+  inMethod?: boolean;
+  classId?: SemanticIdentifier;
+}
+
 class Block {
   private readonly members: Map<string, SemanticIdentifier> = new Map();
   // Names used in this block before they were defined.
@@ -434,12 +460,18 @@ class Block {
   readonly inheritsUnknownMembers: boolean;
   // Whether this block is inside a method.
   readonly inMethod: boolean;
+  // The name of the class this block is in, if any.
+  readonly classId?: SemanticIdentifier;
+  // Whether this block is in a named function or method.
+  readonly inFunction: boolean;
 
   constructor(
       private readonly analyzer: SemanticAnalyzer,
       private readonly parent?: Block, readonly kind: BlockKind = 'module',
-      options: {inheritsUnknownMembers?: boolean, inMethod?: boolean} = {}) {
+      options: BlockOptions = {}) {
     this.file = parent?.file ?? new FileState();
+    this.classId = options.classId ?? parent?.classId;
+    this.inFunction = kind === 'function' || (parent?.inFunction ?? false);
     this.inheritsUnknownMembers =
         options.inheritsUnknownMembers ?? parent?.inheritsUnknownMembers ?? false;
     this.inMethod = options.inMethod ?? parent?.inMethod ?? false;
@@ -554,6 +586,9 @@ class Block {
 
     const sid = new SemanticIdentifier(ast, type, modifiers, idText);
     this.members.set(sid.id, sid);
+    if (this.inFunction && type === 'variable' && modifiers.includes('local')) {
+      this.file.locals.push(sid);
+    }
     return sid;
   }
 
@@ -596,9 +631,11 @@ export class SemanticContext {
     return this.analyzer.analyzedImport(this.filePath, source.name, source.isPath);
   }
 
-  newBlock(
-      kind: BlockKind = 'block',
-      options: {inheritsUnknownMembers?: boolean, inMethod?: boolean} = {}):
+  get analyzerForInference(): SemanticAnalyzer {
+    return this.analyzer;
+  }
+
+  newBlock(kind: BlockKind = 'block', options: BlockOptions = {}):
       SemanticContext {
     const copy = new SemanticContext(
         this.analyzer, this.filePath,
@@ -769,6 +806,155 @@ function lookupMemberFromPossibleModule(
   return null;
 }
 
+// The class of a value, as far as it can be inferred.
+export interface InferredType {
+  name: string;
+  // The class's definition, if it has one in source.
+  cls?: SemanticClass;
+}
+
+const MAX_INFERENCE_DEPTH = 8;
+
+function builtinType(analyzer: SemanticAnalyzer, name: string): InferredType {
+  return {name: name, cls: analyzer.searchBuiltinForId(name)?.cls};
+}
+
+// The class named by [expr], e.g. `Foo` or `module.Foo`, if it names one.
+function namedClass(
+    base: SemanticIdentifier, members: Token[],
+    context: SemanticContext): SemanticClass|undefined {
+  if (members.length === 0) {
+    return resolved(base).cls;
+  }
+  if (members.length === 1) {
+    const member = lookupMemberFromPossibleModule(base, members[0], context);
+    return member ? resolved(member).cls : undefined;
+  }
+  return undefined;
+}
+
+// Infers the class of the value of [expr]. [analyzer] finds builtin classes.
+export function inferType(
+    expr: SemanticExpression|undefined, analyzer: SemanticAnalyzer,
+    depth = 0): InferredType|undefined {
+  if (expr === undefined || depth > MAX_INFERENCE_DEPTH) {
+    return undefined;
+  }
+  if (expr instanceof SemanticIdentifier) {
+    return inferIdentifierType(expr, analyzer, depth);
+  }
+  const ast = expr.ast;
+  switch (ast.kind) {
+    case 'StringExpr':
+      return builtinType(analyzer, 'String');
+    case 'ArrayExpr':
+      return builtinType(analyzer, 'Array');
+    case 'TupleChainExpr':
+      return builtinType(analyzer, 'Tuple');
+    case 'RangeExpr':
+      return builtinType(analyzer, 'Range');
+    case 'MapExpr': {
+      const map = analyzer.lookupDocInfoFromModuleName('struct')
+                      ?.module?.classes.find(c => c.name.id === 'Map');
+      return {name: 'Map', cls: map};
+    }
+    case 'ParensExpr':
+      return inferType(
+          (expr as SemanticParens).expr, analyzer, depth + 1);
+    case 'PostfixChainExpr': {
+      // A constructor call: `Foo(...)` or `module.Foo(...)`.
+      const postfix = expr as SemanticPostfix;
+      const pfxs = postfix.ast.postfixes;
+      const last = pfxs[pfxs.length - 1];
+      if (!(postfix.base instanceof SemanticIdentifier) ||
+          (last.kind !== 'FunctionCallExpr' && last.kind !== 'EmptyParensExpr') ||
+          pfxs.slice(0, -1).some(p => p.kind !== 'MemberAccessExpr')) {
+        return undefined;
+      }
+      const members = pfxs.slice(0, -1).map(
+          p => (p as MemberAccessExpr).field.token);
+      const cls = namedClass(postfix.base, members, postfix.context);
+      return cls === undefined ? undefined : {name: cls.name.id, cls: cls};
+    }
+  }
+  return undefined;
+}
+
+// Infers the class of a variable, field or parameter from the values assigned
+// to it, if they all have the same class. None, numbers and booleans are
+// ignored, as they're often initial values.
+function inferIdentifierType(
+    id: SemanticIdentifier, analyzer: SemanticAnalyzer,
+    depth: number): InferredType|undefined {
+  id = resolved(id);
+  if (id.type === 'class' || id.type === 'function' || id.type === 'method') {
+    return undefined;
+  }
+  let result: InferredType|undefined;
+  for (const value of id.assignments) {
+    if (isConstantExpr(value.ast as Expression)) {
+      continue;
+    }
+    const type = inferType(value, analyzer, depth + 1);
+    if (type === undefined || (result !== undefined && result.name !== type.name)) {
+      return undefined;
+    }
+    result = type;
+  }
+  return result;
+}
+
+// The class [cls] extends, if it's known.
+function superclassOf(cls: SemanticClass): SemanticClass|undefined {
+  const sup = cls.superName;
+  if (sup instanceof SemanticIdentifier) {
+    return resolved(sup).cls;
+  }
+  if (sup !== undefined && sup.ast.kind === 'PostfixChainExpr') {
+    const postfix = sup as SemanticPostfix;
+    const pfxs = postfix.ast.postfixes;
+    if (postfix.base instanceof SemanticIdentifier &&
+        pfxs.every(p => p.kind === 'MemberAccessExpr')) {
+      return namedClass(
+          postfix.base, pfxs.map(p => (p as MemberAccessExpr).field.token),
+          postfix.context);
+    }
+  }
+  return undefined;
+}
+
+// [cls] and the classes it extends, nearest first, ending with Object.
+export function classChain(cls: SemanticClass, analyzer: SemanticAnalyzer):
+    SemanticClass[] {
+  const chain: SemanticClass[] = [];
+  for (let c: SemanticClass|undefined = cls; c !== undefined && chain.length < 16;
+       c = superclassOf(c)) {
+    if (chain.includes(c)) {
+      break;
+    }
+    chain.push(c);
+  }
+  const object = analyzer.searchBuiltinForId('Object')?.cls;
+  if (object !== undefined && !chain.includes(object)) {
+    chain.push(object);
+  }
+  return chain;
+}
+
+// The field, static or method named [name] of [cls] or a class it extends.
+export function memberOf(
+    cls: SemanticClass, name: string,
+    analyzer: SemanticAnalyzer): SemanticIdentifier|undefined {
+  for (const c of classChain(cls, analyzer)) {
+    const member = c.methods.get(name)?.name ?? c.statics.get(name)?.name ??
+        c.fields.find(f => f.name.id === name)?.name;
+    if (member !== undefined) {
+      return resolved(member);
+    }
+  }
+  return undefined;
+}
+
 function generateTokensForPostfix(
     pstfx: SemanticPostfix, context: SemanticContext,
     generator: TokenGenerator): void {
@@ -776,6 +962,10 @@ function generateTokensForPostfix(
     generateTokensForExpression(pstfx.base, context, generator);
   }
   let curId: SemanticIdentifier|null = pstfx.base;
+  const selfClass = pstfx.selfClass && resolved(pstfx.selfClass).cls;
+  let curType: InferredType|undefined = selfClass !== undefined ?
+      {name: selfClass.name.id, cls: selfClass} :
+      inferType(pstfx.base, pstfx.context.analyzerForInference);
   for (const nestedExpr of pstfx.nestedExprs) {
     if (nestedExpr == null) {
       continue;
@@ -787,8 +977,6 @@ function generateTokensForPostfix(
           curId as SemanticIdentifier, tok, context);
 
       if (foundId) {
-        // // Do this?
-        // foundId.addToken(tok, context.filePath);
         generateTokenForIdentiferToken(
             foundId, {
               token: tok,
@@ -796,8 +984,29 @@ function generateTokensForPostfix(
             },
             context, generator);
         curId = null;
+        curType = undefined;
         continue;
       }
+
+      // A member of an object whose class is known.
+      const member =
+          curType?.cls && memberOf(curType.cls, tok.text, pstfx.context.analyzerForInference);
+      if (member) {
+        generateTokenForIdentiferToken(
+            member, {token: tok, filePath: context.filePath}, context,
+            generator);
+        curId = null;
+        // A call or index of the member gives something else.
+        const next = tok.next?.kind;
+        curType = member.type === 'property' &&
+                next !== TokenKind.SYMBOL_LPAREN &&
+                next !== TokenKind.SYMBOL_LBRACKET ?
+            inferType(member, pstfx.context.analyzerForInference) :
+            undefined;
+        continue;
+      }
+      curId = null;
+      curType = undefined;
 
       generator.createToken(
           tok,
@@ -805,6 +1014,7 @@ function generateTokensForPostfix(
     } else {
       generateTokensForExpression(
           nestedExpr as SemanticExpression, context, generator);
+      curType = undefined;
     }
   }
 }
@@ -1056,8 +1266,7 @@ function generateTokensForClass(
     }
   }
   for (const field of cls.fields) {
-    generator.createToken(
-        field.token, 'property', undefined, undefined, cls.name.id);
+    generateTokensForIdentifier(field.name, context, generator, cls.name.id);
     if (field.ast.kind === 'ParamExpr') {
       generator.createToken(field.ast.field!, 'keyword');
     }
@@ -1200,6 +1409,7 @@ function processUse(id: IdentifierExpr, context: SemanticContext):
     SemanticIdentifier {
   const identifier = context.block.lookupUse(id.token);
   identifier.addToken(id.token, context.filePath);
+  identifier.reads++;
   return identifier;
 }
 
@@ -1242,7 +1452,15 @@ function processPostfix(
       nestedExprs.push(pfx.field.token);
     }
   }
-  return {ast: postfix, base: base, nestedExprs: nestedExprs};
+  const isSelf = postfix.lhs.kind === 'IdentifierExpr' &&
+      postfix.lhs.token.text === 'self';
+  return {
+    ast: postfix,
+    base: base,
+    nestedExprs: nestedExprs,
+    context: context,
+    selfClass: isSelf ? context.block.classId : undefined,
+  };
 }
 
 function processNamedArg(
@@ -1321,6 +1539,13 @@ function processRange(
   };
 }
 
+// Records a parameter's default value, for inferring its class.
+function recordDefault(param: SemanticParam): void {
+  if (param.defaultValue !== undefined) {
+    resolved(param.name).assignments.push(param.defaultValue);
+  }
+}
+
 function processAnon(expr: AnonExpr, context: SemanticContext): SemanticAnon {
   const params: SemanticParam[] = [];
   const newContext = context.newBlock();
@@ -1333,6 +1558,7 @@ function processAnon(expr: AnonExpr, context: SemanticContext): SemanticAnon {
           undefined :
           processExpression(param.defaultValue, newContext)
     });
+    recordDefault(params[params.length - 1]);
   }
   return {
     ast: expr,
@@ -1450,7 +1676,29 @@ function processAssign(
     rhs: processExpression(expr.rhs, context)
   };
   recordAlias(expr, context);
+  recordAssignment(assign, context);
   return assign;
+}
+
+// Records the value assigned to a variable, or to a field with `self.name =`,
+// for inferring its class.
+function recordAssignment(assign: SemanticAssign, context: SemanticContext):
+    void {
+  const lhs = assign.lhs.expr;
+  if (lhs instanceof SemanticIdentifier) {
+    resolved(lhs).assignments.push(assign.rhs);
+    return;
+  }
+  const ast = assign.ast.lhs;
+  if (ast.kind === 'PostfixChainExpr' && ast.lhs.kind === 'IdentifierExpr' &&
+      ast.lhs.token.text === 'self' && ast.postfixes.length === 1 &&
+      ast.postfixes[0].kind === 'MemberAccessExpr') {
+    const found = context.block.findScoped(ast.postfixes[0].field.token.text);
+    if (found !== undefined &&
+        (found.id.type === 'property' || context.block.kind === 'module')) {
+      resolved(found.id).assignments.push(assign.rhs);
+    }
+  }
 }
 
 // Records that a module member defined as another name, as in `self.sort =
@@ -1500,6 +1748,7 @@ function processFunction(
           undefined :
           processExpression(param.defaultValue, newContext)
     });
+    recordDefault(params[params.length - 1]);
   }
   return {
     ast: stat,
@@ -1510,10 +1759,117 @@ function processFunction(
   };
 }
 
+// Marks the names a catch assigns, which needn't be used.
+function mayBeUnused(lhs: SemanticAssignLhs, context: SemanticContext): SemanticAssignLhs {
+  const mark = (l: SemanticAssignLhs) => {
+    if (l.expr instanceof SemanticIdentifier) {
+      context.block.file.mayBeUnused.add(l.expr);
+    } else if (Array.isArray(l.expr)) {
+      l.expr.forEach(mark);
+    }
+  };
+  mark(lhs);
+  return lhs;
+}
+
+// The first and last tokens of a syntax tree node.
+function tokenSpan(node: unknown): [Token, Token]|undefined {
+  let first: Token|undefined, last: Token|undefined;
+  const visit = (value: unknown) => {
+    if (value === null || typeof value !== 'object') {
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    const obj = value as Record<string, unknown>;
+    if ('pos' in obj && typeof obj.kind === 'number') {
+      const token = obj as unknown as Token;
+      if (first === undefined || token.pos.index < first.pos.index) {
+        first = token;
+      }
+      if (last === undefined || token.pos.index > last.pos.index) {
+        last = token;
+      }
+      return;
+    }
+    for (const key in obj) {
+      visit(obj[key]);
+    }
+  };
+  visit(node);
+  return first && last && [first, last];
+}
+
+// Reports the statements of a block after one that always leaves it: a
+// return, break, continue, raise or exit.
+function checkReachable(stat: CompoundStat, context: SemanticContext): void {
+  const leaves = stat.stats.findIndex(
+      s => s.kind === 'JumpStat' || s.kind === 'RaiseStat' || s.kind === 'ExitStat');
+  if (leaves < 0 || leaves === stat.stats.length - 1) {
+    return;
+  }
+  const start = tokenSpan(stat.stats[leaves + 1]);
+  const end = tokenSpan(stat.stats[stat.stats.length - 1]);
+  if (start === undefined || end === undefined) {
+    return;
+  }
+  const [first] = start;
+  const [, last] = end;
+  context.block.file.problems.push({
+    message: 'Unreachable code.',
+    severity: 'hint',
+    row: first.pos.rowBegin - 1,
+    col: first.pos.columnBegin - 1,
+    length: first.text.length,
+    endRow: last.pos.rowEnd - 1,
+    endCol: last.pos.columnEnd - 1,
+    code: 'unreachable-code',
+    unnecessary: true,
+  });
+}
+
+// Reports imports and the variables of functions and methods that are never
+// read. Names starting with _ are allowed to be unused.
+function checkUnused(
+    file: FileState, module: SemanticModule, analyzer: SemanticAnalyzer,
+    filePath: string): void {
+  if (analyzer.isStandardLibraryFile(filePath)) {
+    return;
+  }
+  for (const imprt of module.imports) {
+    const id = resolved(imprt.name);
+    const token = imprt.ast.name?.token ?? imprt.ast.source.token;
+    if (id.reads === 0 && !id.id.startsWith('_')) {
+      file.problems.push({
+        ...problemAt(token, `'${id.id}' is imported but never used.`, 'hint'),
+        code: 'unused-import',
+        unnecessary: true,
+      });
+    }
+  }
+  for (const local of file.locals) {
+    const id = resolved(local);
+    const declaration = id.tokens[0];
+    if (id !== local || id.reads > 0 || id.id.startsWith('_') ||
+        file.mayBeUnused.has(id) || declaration === undefined ||
+        declaration.filePath !== filePath) {
+      continue;
+    }
+    file.problems.push({
+      ...problemAt(declaration.token, `'${id.id}' is assigned but never used.`, 'hint'),
+      code: 'unused-variable',
+      unnecessary: true,
+    });
+  }
+}
+
 function processStatement(
     stat: Statement, context: SemanticContext): SemanticStatement {
   if (stat.kind === 'CompoundStat') {
     const newContext = context.newBlock();
+    checkReachable(stat, context);
     return {
       ast: stat,
       stats: stat.stats.map(s => processStatement(s, newContext))
@@ -1564,7 +1920,7 @@ function processStatement(
     return {
       ast: stat,
       tryStat: processStatement(stat.stat, tryContext),
-      catchAssign: processAssignLhs(stat.catchAssign, catchContext),
+      catchAssign: mayBeUnused(processAssignLhs(stat.catchAssign, catchContext), catchContext),
       catchStat: processStatement(stat.catchStat, catchContext)
     };
   } else if (stat.kind === 'RaiseStat') {
@@ -1667,6 +2023,11 @@ function processMethod(
           undefined :
           processExpression(param.defaultValue, newContext)
     });
+    recordDefault(params[params.length - 1]);
+    const defaultValue = params[params.length - 1].defaultValue;
+    if (param.field != null && defaultValue !== undefined) {
+      resolved(fields[fields.length - 1].name).assignments.push(defaultValue);
+    }
   }
   return {
     ast: stat,
@@ -1775,9 +2136,11 @@ function processModule(
   }
   for (const stat of module.statements) {
     if (stat.kind === 'ClassStat') {
-      classes.push(processClass(
-          stat, processIdentifier(stat.name, context, 'class', []),
-          context.newBlock('class')));
+      const name = processIdentifier(stat.name, context, 'class', []);
+      const cls = processClass(
+          stat, name, context.newBlock('class', {classId: name}));
+      name.cls = cls;
+      classes.push(cls);
     }
   }
   for (const stat of module.statements) {
@@ -1810,6 +2173,7 @@ function resolveUnresolvedNames(
     if (found !== undefined && found.id !== unresolved.id) {
       unresolved.id.forward = found.id;
       found.id.tokens.push(...unresolved.id.tokens);
+      found.id.reads += unresolved.id.reads;
       if (isHiddenTopLevelVariable(found)) {
         for (const use of unresolved.uses) {
           file.problems.push(hiddenTopLevelVariableProblem(use, found.id));
@@ -1868,6 +2232,7 @@ export function generateSemanticTokens(
   const file = context.block.file;
   resolveUnresolvedNames(file, analyzer, filePath);
   checkCalls(file);
+  checkUnused(file, semanticModule, analyzer, filePath);
   generatTokensForModule(semanticModule, context, generator);
   return [context, semanticModule, generator.finalizeTokens(), file.problems];
 }

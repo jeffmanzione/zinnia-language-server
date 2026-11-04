@@ -102,3 +102,36 @@ describe('workspace index', () => {
         'import shapes\nx = shapes.area(1)\n');
   });
 });
+
+describe('importers and workspace folders', () => {
+  it('reanalyzes importers against an edited module', async () => {
+    const [analyzer] = await indexed();
+    const shapes = path.join(workspace, 'shapes.zn');
+    analyzer.setOpen(shapes, true);
+    await analyzer.parseDocument(
+        {textDocument: {uri: 'file://' + shapes}, text: '\nfunction area(s) s\n'});
+    assert.deepEqual(
+        analyzer.importersOf(shapes).map(d => path.relative(workspace, d.path)).sort(),
+        ['a_main.zn', 'sub/more.zn']);
+    assert.deepEqual(
+        analyzer.reanalyzeImportersOf(shapes).map(p => path.relative(workspace, p)).sort(),
+        ['a_main.zn', 'sub/more.zn']);
+    assert.deepEqual(
+        renamesOf(analyzer, shapes, 'area'),
+        ['a_main.zn:2:12', 'shapes.zn:2:10', 'sub/more.zn:2:12']);
+    analyzer.setOpen(shapes, false);
+  });
+
+  it('indexes added folders and forgets removed ones', async () => {
+    const other = mkdtempSync(path.join(tmpdir(), 'zinnia-other-'));
+    writeFileSync(path.join(other, 'extra.zn'), 'function extra() 1\n');
+    const [analyzer] = await indexed();
+    const folder = {uri: 'file://' + other, name: 'other'};
+    assert.equal(await analyzer.addWorkspaceFolder(folder), 1);
+    const extra = path.join(other, 'extra.zn');
+    assert.ok(analyzer.lookupDocInfoFromFile(extra) !== undefined);
+    analyzer.removeWorkspaceFolder(folder);
+    assert.equal(analyzer.lookupDocInfoFromFile(extra), undefined);
+    assert.ok(analyzer.lookupDocInfoFromFile(path.join(workspace, 'shapes.zn')) !== undefined);
+  });
+});

@@ -1,17 +1,19 @@
-import {CodeAction, CodeActionKind, CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
+import {CodeAction, CodeActionKind, DiagnosticTag, CompletionItem, CompletionItemKind, createConnection, Definition, DidChangeWatchedFilesNotification, FileChangeType, ErrorCodes, PrepareRenameResult, ResponseError, TextEdit, WorkspaceEdit, WorkspaceSymbol, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover, InitializeParams, InitializeResult, Location, MarkupKind, Position, ProposedFeatures, SemanticTokens, SemanticTokensBuilder, SignatureHelp, SignatureInformation, TextDocuments, TextDocumentSyncKind} from 'vscode-languageserver/node';
 import {TextDocument} from 'vscode-languageserver-textdocument';
 import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {DiagnosticData, quickFixes} from './codeActions';
-import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, signatureInformation} from './completion';
+import {testLenses} from './codeLens';
+import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
 import {foldingRanges} from './folding';
-import {formatText} from './format';
+import {formatRows, formatText} from './format';
+import {documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from './navigation';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
 import {NATIVE_FUNCTIONS, NATIVE_METHODS} from './semantics/natives';
-import {SemanticClass, SemanticToken} from './semantics/semantic';
+import {resolved, SemanticClass, SemanticToken} from './semantics/semantic';
 import {invalidName, renameLocations, renameTarget} from './rename';
 import {documentSymbols, workspaceSymbols} from './symbols';
 
@@ -106,10 +108,12 @@ function hoverText(token: SemanticToken): string {
   return `${kind} \`${name}\``;
 }
 
-function encodeTokens(tokens: SemanticToken[]): SemanticTokens {
+// Pushes [tokens] to [builder] and returns it.
+function encodeTokens(
+    tokens: SemanticToken[],
+    builder = new SemanticTokensBuilder()): SemanticTokensBuilder {
   // Tokens must be sent in document order, once per position.
   const sorted = tokens.slice().sort((a, b) => a.row - b.row || a.col - b.col);
-  const builder = new SemanticTokensBuilder();
   let lastRow = -1, lastCol = -1;
   for (const token of sorted) {
     if (token.row === lastRow && token.col === lastCol) {
@@ -125,7 +129,7 @@ function encodeTokens(tokens: SemanticToken[]): SemanticTokens {
         token.row, token.col, token.text.length,
         tokenTypeIndices.get(token.type) ?? 0, modifiers);
   }
-  return builder.build();
+  return builder;
 }
 
 // Reads the standard library from the configured directory, or the bundled
@@ -146,6 +150,10 @@ function loadLibs(libraryPath: string|undefined) {
 
 // Whether the client can be asked to watch files for the server.
 let canWatchFiles = false;
+// Whether the client can be asked to request semantic tokens again.
+let canRefreshTokens = false;
+// Whether the client tells the server about workspace folder changes.
+let hearsFolderChanges = false;
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   const libraryPath = params.initializationOptions?.libraryPath as string |
@@ -153,6 +161,9 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   analyzer.init(params.workspaceFolders ?? [], () => loadLibs(libraryPath));
   canWatchFiles = params.capabilities.workspace?.didChangeWatchedFiles
                       ?.dynamicRegistration === true;
+  canRefreshTokens =
+      params.capabilities.workspace?.semanticTokens?.refreshSupport === true;
+  hearsFolderChanges = params.capabilities.workspace?.workspaceFolders === true;
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -161,7 +172,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
           tokenTypes: ZINNIA_TOKEN_TYPES,
           tokenModifiers: ZINNIA_TOKEN_MODIFIERS,
         },
-        full: true,
+        full: {delta: true},
+        range: true,
       },
       hoverProvider: true,
       definitionProvider: true,
@@ -171,9 +183,18 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       renameProvider: {prepareProvider: true},
       foldingRangeProvider: true,
       documentFormattingProvider: true,
+      documentRangeFormattingProvider: true,
+      documentOnTypeFormattingProvider: {firstTriggerCharacter: '}', moreTriggerCharacter: [')', ']']},
+      documentHighlightProvider: true,
+      callHierarchyProvider: true,
+      inlayHintProvider: true,
+      codeLensProvider: {resolveProvider: false},
       codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
+      workspace: {
+        workspaceFolders: {supported: true, changeNotifications: true},
+      },
     },
   };
 });
@@ -186,11 +207,57 @@ connection.onInitialized(async () => {
         DidChangeWatchedFilesNotification.type,
         {watchers: [{globPattern: '**/*.zn'}]});
   }
+  if (hearsFolderChanges) {
+    connection.workspace.onDidChangeWorkspaceFolders(async event => {
+      for (const folder of event.removed) {
+        analyzer.removeWorkspaceFolder(folder);
+      }
+      for (const folder of event.added) {
+        await analyzer.addWorkspaceFolder(folder);
+      }
+      // Imports may now resolve differently.
+      await refreshOpenDocuments(documents.all().map(d => filePathOf(d.uri)));
+    });
+  }
   const start = Date.now();
   const count = await analyzer.indexWorkspace();
   connection.console.log(
       `Indexed ${count} Zinnia files in ${Date.now() - start} ms.`);
+  // Documents opened while indexing may import modules indexed after them.
+  await refreshOpenDocuments(documents.all().map(d => filePathOf(d.uri)));
 });
+
+// Reanalyzes the open documents at [paths] with their current text, e.g.
+// after a module they import changed, and sends their diagnostics again.
+async function refreshOpenDocuments(paths: string[]): Promise<void> {
+  const refreshed = documents.all().filter(
+      document => paths.includes(filePathOf(document.uri)));
+  if (refreshed.length === 0) {
+    return;
+  }
+  await Promise.all(refreshed.map(async document => {
+    const info = analyzer.parseDocument(
+        {textDocument: {uri: document.uri}, text: document.getText()});
+    analyses.set(document.uri, {version: document.version, info: info});
+    publishDiagnostics(document, await info);
+  }));
+  if (canRefreshTokens) {
+    connection.languages.semanticTokens.refresh();
+  }
+}
+
+// After an open document is edited, the files that import it are
+// reanalyzed against its new analysis, once edits pause.
+const importerRefreshes = new Map<string, ReturnType<typeof setTimeout>>();
+const IMPORTER_REFRESH_DELAY_MS = 300;
+
+function refreshImportersSoon(filePath: string): void {
+  clearTimeout(importerRefreshes.get(filePath));
+  importerRefreshes.set(filePath, setTimeout(() => {
+    importerRefreshes.delete(filePath);
+    refreshOpenDocuments(analyzer.reanalyzeImportersOf(filePath));
+  }, IMPORTER_REFRESH_DELAY_MS));
+}
 
 connection.onDidChangeWatchedFiles(params => {
   for (const change of params.changes) {
@@ -198,11 +265,10 @@ connection.onDidChangeWatchedFiles(params => {
     if (!filePath.endsWith('.zn')) {
       continue;
     }
-    if (change.type === FileChangeType.Deleted) {
-      analyzer.forgetFile(filePath);
-    } else {
-      analyzer.refreshFile(filePath);
-    }
+    const reanalyzed = change.type === FileChangeType.Deleted ?
+        analyzer.forgetFile(filePath) :
+        analyzer.refreshFile(filePath);
+    refreshOpenDocuments(reanalyzed);
   }
 });
 
@@ -217,6 +283,11 @@ documents.onDidChangeContent(async change => {
   if (documents.get(document.uri)?.version !== document.version) {
     return;
   }
+  publishDiagnostics(document, info);
+  refreshImportersSoon(info.path);
+});
+
+function publishDiagnostics(document: TextDocument, info: SemanticDocInfo): void {
   const end = document.positionAt(document.getText().length);
   const diagnostics: Diagnostic[] = info.problems.map(problem => {
     const start = problem.row === undefined ?
@@ -224,13 +295,17 @@ documents.onDidChangeContent(async change => {
         {line: problem.row, character: problem.col ?? 0};
     return {
       severity: problem.severity === 'warning' ? DiagnosticSeverity.Warning :
+          problem.severity === 'hint'          ? DiagnosticSeverity.Hint :
                                                  DiagnosticSeverity.Error,
       range: {
         start: start,
-        end: {...start, character: start.character + (problem.length ?? 1)}
+        end: problem.endRow !== undefined ?
+            {line: problem.endRow, character: problem.endCol ?? 0} :
+            {...start, character: start.character + (problem.length ?? 1)},
       },
       message: problem.message,
       source: 'zinnia',
+      tags: problem.unnecessary ? [DiagnosticTag.Unnecessary] : undefined,
       code: problem.code,
       data: problem.declaration === undefined ?
           undefined :
@@ -238,17 +313,50 @@ documents.onDidChangeContent(async change => {
     };
   });
   connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});
-});
+}
 
 documents.onDidClose(event => {
   analyses.delete(event.document.uri);
-  analyzer.setOpen(filePathOf(event.document.uri), false);
+  tokenBuilders.delete(event.document.uri);
+  // Once closed, it's analyzed from disk again, and so are the files that
+  // import it.
+  refreshOpenDocuments(analyzer.setOpen(filePathOf(event.document.uri), false));
   connection.sendDiagnostics({uri: event.document.uri, diagnostics: []});
 });
 
+// The last semantic tokens sent for each document, for sending the next ones
+// as edits.
+const tokenBuilders = new Map<string, SemanticTokensBuilder>();
+
 connection.languages.semanticTokens.on(async params => {
   const info = await analysisFor(params.textDocument.uri);
-  return encodeTokens(info?.tokens ?? []);
+  const builder = encodeTokens(info?.tokens ?? []);
+  tokenBuilders.set(params.textDocument.uri, builder);
+  return builder.build();
+});
+
+connection.languages.semanticTokens.onDelta(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  let builder = tokenBuilders.get(params.textDocument.uri);
+  if (builder === undefined) {
+    builder = encodeTokens(info?.tokens ?? []);
+    tokenBuilders.set(params.textDocument.uri, builder);
+    return builder.build();
+  }
+  builder.previousResult(params.previousResultId);
+  encodeTokens(info?.tokens ?? [], builder);
+  return builder.buildEdits();
+});
+
+connection.languages.semanticTokens.onRange(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  const {start, end} = params.range;
+  return encodeTokens((info?.tokens ?? []).filter(
+                          t => (t.row > start.line ||
+                                (t.row === start.line && t.col >= start.character)) &&
+                              (t.row < end.line ||
+                               (t.row === end.line && t.col < end.character))))
+      .build();
 });
 
 connection.onHover(async (params): Promise<Hover|null> => {
@@ -280,8 +388,26 @@ connection.onReferences(async (params): Promise<Location[]> => {
   if (token === undefined) {
     return [];
   }
-  const locations = identifierLocations(token);
-  return params.context.includeDeclaration ? locations : locations.slice(1);
+  const id = token.identifier && resolved(token.identifier);
+  const declaration = id?.tokens[0];
+  if (id === undefined || declaration === undefined) {
+    return [];
+  }
+  // Uses through `module.name` and `object.name` are found in the analyzed
+  // documents, as for rename.
+  const locations: Location[] = [];
+  for (const loc of renameLocations(
+           {id: id, declaration: declaration, token: token},
+           analyzer.analyzedDocuments())) {
+    const isDeclaration = loc.filePath === declaration.filePath &&
+        loc.row === declaration.token.pos.rowBegin - 1 &&
+        loc.col === declaration.token.pos.columnBegin - 1;
+    const location = locationOf(loc.filePath, loc.row, loc.col, loc.length);
+    if (location !== undefined && (params.context.includeDeclaration || !isDeclaration)) {
+      locations.push(location);
+    }
+  }
+  return locations;
 });
 
 connection.onDocumentSymbol(async (params): Promise<DocumentSymbol[]> => {
@@ -309,11 +435,12 @@ function knownClasses(info: SemanticDocInfo): {cls: SemanticClass, text: string}
 }
 
 async function memberCompletions(
-    info: SemanticDocInfo, receiver: string, line: number): Promise<CompletionItem[]> {
+    info: SemanticDocInfo, receiver: string, position: Position):
+    Promise<CompletionItem[]> {
   if (receiver === 'self') {
-    const cls = classAt(info, line);
+    const cls = classAt(info, position.line);
     if (cls !== undefined) {
-      return classMembers(cls, info.text);
+      return typeMembers({name: cls.name.id, cls: cls}, analyzer);
     }
   }
   const imprt = info.module?.imports.find(i => i.name.id === receiver);
@@ -321,6 +448,11 @@ async function memberCompletions(
     const module = await analyzer.importedModule(info.path, imprt);
     return module === undefined ? [] :
                                   moduleMembers(module, moduleNameOf(imprt.ast), analyzer);
+  }
+  const type = receiverType(
+      info, receiver, position.line, position.character, analyzer);
+  if (type !== undefined) {
+    return typeMembers(type, analyzer);
   }
   // The receiver's class isn't known, so offer the members of all known
   // classes.
@@ -353,7 +485,7 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
     const access =
         memberAccessAt(document.getText(), document.offsetAt(params.position));
     if (access !== undefined) {
-      return memberCompletions(info, access.receiver, params.position.line);
+      return memberCompletions(info, access.receiver, params.position);
     }
   }
   const items = new Map<string, CompletionItem>();
@@ -373,7 +505,8 @@ connection.onCompletion(async (params): Promise<CompletionItem[]> => {
 
 async function signatureFor(
     info: SemanticDocInfo, receiver: string|undefined, name: string,
-    line: number): Promise<SignatureInformation|undefined> {
+    position: Position): Promise<SignatureInformation|undefined> {
+  const line = position.line;
   const methodOf = (cls: SemanticClass|undefined, text: string) => {
     const method = cls?.methods.get(name);
     if (method !== undefined) {
@@ -386,7 +519,7 @@ async function signatureFor(
   if (receiver === 'self') {
     const cls = classAt(info, line);
     if (cls !== undefined) {
-      return methodOf(cls, info.text);
+      return typeMethodSignature({name: cls.name.id, cls: cls}, name, analyzer);
     }
     // At the top level, `self` is the module.
     receiver = undefined;
@@ -402,6 +535,11 @@ async function signatureFor(
       }
       const native = NATIVE_FUNCTIONS[moduleNameOf(imprt.ast) ?? '']?.[name];
       return native && nativeSignature(name, native);
+    }
+    const type =
+        receiverType(info, receiver, line, position.character, analyzer);
+    if (type !== undefined) {
+      return typeMethodSignature(type, name, analyzer);
     }
     // The receiver's class isn't known: use the first known class with a
     // method of this name, then the first native one.
@@ -450,7 +588,7 @@ connection.onSignatureHelp(async (params): Promise<SignatureHelp|null> => {
   }
   const call = callAt(document.getText(), document.offsetAt(params.position));
   const signature = call &&
-      await signatureFor(info, call.receiver, call.name, params.position.line);
+      await signatureFor(info, call.receiver, call.name, params.position);
   if (signature === undefined) {
     return null;
   }
@@ -548,6 +686,69 @@ connection.onDocumentFormatting(params => {
   }];
 });
 
+// Edits that replace whole lines of [document], keeping their line ends.
+function lineEdits(edits: {row: number, newText: string}[], document: TextDocument): TextEdit[] {
+  const lines = document.getText().split(/\r?\n/);
+  return edits.map(edit => ({
+    range: {
+      start: {line: edit.row, character: 0},
+      end: {line: edit.row, character: lines[edit.row].length},
+    },
+    newText: edit.newText,
+  }));
+}
+
+connection.onDocumentRangeFormatting(params => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return [];
+  }
+  return lineEdits(
+      formatRows(document.getText(), params.options, params.range.start.line,
+                 params.range.end.line),
+      document);
+});
+
+// Re-indents a line once its closing bracket is typed.
+connection.onDocumentOnTypeFormatting(params => {
+  const document = documents.get(params.textDocument.uri);
+  if (document === undefined) {
+    return [];
+  }
+  const line = params.position.line;
+  return lineEdits(formatRows(document.getText(), params.options, line, line), document);
+});
+
+connection.onCodeLens(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ? [] : testLenses(info);
+});
+
+connection.onDocumentHighlight(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ? [] :
+                              documentHighlights(info, tokenAt(info, params.position));
+});
+
+connection.languages.callHierarchy.onPrepare(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ? [] :
+                              prepareCallHierarchy(tokenAt(info, params.position), analyzer);
+});
+
+connection.languages.callHierarchy.onIncomingCalls(
+    params => incomingCalls(params.item, analyzer));
+
+connection.languages.callHierarchy.onOutgoingCalls(
+    params => outgoingCalls(params.item, analyzer));
+
+connection.languages.inlayHint.on(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ?
+      [] :
+      inlayHints(info, params.range.start.line, params.range.end.line, analyzer);
+});
+
 connection.onCodeAction(async (params): Promise<CodeAction[]> => {
   const info = await analysisFor(params.textDocument.uri);
   if (info === undefined) {
@@ -556,8 +757,28 @@ connection.onCodeAction(async (params): Promise<CodeAction[]> => {
   return quickFixes(
       info, params.textDocument.uri,
       params.context.diagnostics.filter(d => d.source === 'zinnia'),
-      name => analyzer.isImportable(info.path, name));
+      {
+        isModule: name => analyzer.isImportable(info.path, name),
+        names: () => visibleNames(info),
+      });
 });
+
+// The names a misspelled name may have meant: those the document uses or
+// defines at the top level, and builtin's.
+function visibleNames(info: SemanticDocInfo): string[] {
+  const names = new Set<string>();
+  for (const token of info.tokens) {
+    if (token.identifier !== undefined) {
+      names.add(token.text);
+    }
+  }
+  for (const doc of [info, analyzer.lookupDocInfoFromModuleName('builtin')]) {
+    for (const id of doc?.context?.block.definitions() ?? []) {
+      names.add(id.id);
+    }
+  }
+  return [...names];
+}
 
 documents.listen(connection);
 connection.listen();

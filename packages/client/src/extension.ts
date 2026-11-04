@@ -1,13 +1,37 @@
-import {ExtensionContext, workspace} from 'vscode';
+import {commands, ExtensionContext, Terminal, Uri, window, workspace} from 'vscode';
 import {LanguageClient, LanguageClientOptions, ServerOptions, TransportKind} from 'vscode-languageclient/node';
 import {SERVER_ENTRY_POINT_PATH, ZINNIA_DOCUMENT_SELECTOR, ZINNIA_LANGUAGE_ID, ZINNIA_LANGUAGE_NAME} from 'zinnia-language-shared/constants';
 
 let client: LanguageClient;
+let terminal: Terminal|undefined;
 
-// The server provides semantic tokens, hovers, definitions, references,
-// document symbols, completion and diagnostics through the standard Language
-// Server Protocol, so the client needs no providers of its own.
+// Quotes [arg] for a shell, if it needs it.
+function shellQuote(arg: string): string {
+  return /^[\w@%+=:,./-]+$/.test(arg) ? arg : `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+// Runs the Zinnia file at [uri], or the active editor's, with the configured
+// executable, in a terminal of its own. The server's test lenses use this.
+function runFile(uri?: string): void {
+  const file = uri !== undefined ? Uri.parse(uri) : window.activeTextEditor?.document.uri;
+  if (file === undefined || file.scheme !== 'file') {
+    window.showErrorMessage('Open a saved Zinnia file to run it.');
+    return;
+  }
+  const executable =
+      workspace.getConfiguration('zinnia').get<string>('executable') || 'zinnia';
+  if (terminal === undefined || terminal.exitStatus !== undefined) {
+    terminal = window.createTerminal('Zinnia');
+  }
+  terminal.show(true);
+  terminal.sendText(`${shellQuote(executable)} ${shellQuote(file.fsPath)}`);
+}
+
+// The server provides its features through the standard Language Server
+// Protocol, so the client needs no providers of its own, only the command its
+// test lenses run.
 export function activate(context: ExtensionContext) {
+  context.subscriptions.push(commands.registerCommand('zinnia.runFile', runFile));
   const serverEntryPoint = context.asAbsolutePath(SERVER_ENTRY_POINT_PATH);
   // If the extension is launched in debug mode then the debug server options
   // are used Otherwise the run options are used
