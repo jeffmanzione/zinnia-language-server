@@ -32,6 +32,10 @@ that speaks the [Language Server Protocol](https://microsoft.github.io/language-
 - **Formatting** of documents and ranges, and re-indenting a line when its
   closing bracket is typed. Zinnia files default to two-space indentation.
 - **Folding** of blocks, comments and imports.
+- **Run tests**: a lens on each `@test.TestClass` class runs the file with
+  `zinnia` (set `zinnia.executable` if it isn't on your `PATH`). zinnia's
+  test runner runs all of a file's tests at once. **Zinnia: Run File** runs
+  the current file the same way.
 
 The server analyzes every Zinnia file in the workspace when it starts, and
 follows changes made in the editor and on disk.

@@ -39,6 +39,21 @@
 				"configuration": "./packages/shared/src/language-configuration.json"
 			}
 		],
+		"commands": [
+			{
+				"command": "zinnia.runFile",
+				"title": "Run File",
+				"category": "Zinnia"
+			}
+		],
+		"menus": {
+			"commandPalette": [
+				{
+					"command": "zinnia.runFile",
+					"when": "editorLangId == zinnia"
+				}
+			]
+		},
 		"configurationDefaults": {
 			"[zinnia]": {
 				"editor.tabSize": 2,
@@ -72,6 +87,12 @@
 					],
 					"default": "off",
 					"description": "Traces the communication between VS Code and the language server."
+				},
+				"zinnia.executable": {
+					"scope": "machine-overridable",
+					"type": "string",
+					"default": "zinnia",
+					"description": "The zinnia executable that the Run tests lens runs files with."
 				},
 				"zinnia.libraryPath": {
 					"scope": "machine-overridable",

@@ -4,6 +4,7 @@ import {URI} from 'vscode-uri';
 import {ZINNIA_TOKEN_MODIFIERS, ZINNIA_TOKEN_TYPES} from 'zinnia-language-shared/legend';
 
 import {DiagnosticData, quickFixes} from './codeActions';
+import {testLenses} from './codeLens';
 import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, moduleMembers, nativeMethodsOfClass, nativeSignature, receiverType, signatureInformation, typeMembers, typeMethodSignature} from './completion';
 import {foldingRanges} from './folding';
 import {formatRows, formatText} from './format';
@@ -187,6 +188,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       documentHighlightProvider: true,
       callHierarchyProvider: true,
       inlayHintProvider: true,
+      codeLensProvider: {resolveProvider: false},
       codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
@@ -715,6 +717,11 @@ connection.onDocumentOnTypeFormatting(params => {
   }
   const line = params.position.line;
   return lineEdits(formatRows(document.getText(), params.options, line, line), document);
+});
+
+connection.onCodeLens(async params => {
+  const info = await analysisFor(params.textDocument.uri);
+  return info === undefined ? [] : testLenses(info);
 });
 
 connection.onDocumentHighlight(async params => {
