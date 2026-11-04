@@ -28,6 +28,8 @@ export interface ParseProblem {
   endCol?: number;
   // Whether the code is unneeded: unused or unreachable.
   unnecessary?: boolean;
+  // For an unknown member: the members the class has.
+  suggestions?: string[];
   // What kind of problem this is, for the problems that have quick fixes.
   code?: string;
   // For a hidden top-level variable: where it's declared, 0-based.

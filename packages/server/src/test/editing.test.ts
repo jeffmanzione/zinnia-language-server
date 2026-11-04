@@ -6,7 +6,7 @@ import {Diagnostic, DiagnosticSeverity} from 'vscode-languageserver/node';
 import {editDistance, quickFixes, similarNames} from '../codeActions';
 import {foldingRanges} from '../folding';
 import {formatText} from '../format';
-import {SemanticAnalyzer} from '../semantics/analyzer';
+import {SemanticAnalyzer, SemanticDocInfo} from '../semantics/analyzer';
 
 const OPTIONS = {tabSize: 2, insertSpaces: true};
 
@@ -204,5 +204,18 @@ describe('similar names', () => {
   it('allows more edits for longer names', () => {
     assert.deepEqual(similarNames('lst', ['list', 'last', 'lots']), ['last', 'list']);
     assert.deepEqual(similarNames('printn', ['println', 'print', 'sprint']), ['print', 'println', 'sprint']);
+  });
+});
+
+describe('unknown member fixes', () => {
+  it('suggests the class\'s similar members', () => {
+    const info = {text: 's.aera()\n', module: undefined} as unknown as SemanticDocInfo;
+    const actions = quickFixes(info, 'file:///m.zn', [{
+      range: {start: {line: 0, character: 2}, end: {line: 0, character: 6}},
+      message: '\'Square\' has no member \'aera\'.',
+      code: 'unknown-member',
+      data: {suggestions: ['area', 'grow', 'side']},
+    }], {isModule: () => false, names: () => []});
+    assert.deepEqual(actions.map(a => a.title), ['Change to \'area\'']);
   });
 });

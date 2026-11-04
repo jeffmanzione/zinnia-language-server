@@ -299,9 +299,10 @@ function publishDiagnostics(document: TextDocument, info: SemanticDocInfo): void
       source: 'zinnia',
       tags: problem.unnecessary ? [DiagnosticTag.Unnecessary] : undefined,
       code: problem.code,
-      data: problem.declaration === undefined ?
+      data: problem.declaration === undefined && problem.suggestions === undefined ?
           undefined :
-          {declaration: problem.declaration} satisfies DiagnosticData,
+          {declaration: problem.declaration, suggestions: problem.suggestions} satisfies
+              DiagnosticData,
     };
   });
   connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});

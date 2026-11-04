@@ -111,8 +111,8 @@ describe('receiver types', () => {
     assert.ok(!('error' in target));
     assert.deepEqual(
         renameLocations(target, [info]).map(l => `${l.row + 1}:${l.col + 1}`),
-        // The result of grow() isn't inferred.
-        ['3:10', '10:7']);
+        // grow() returns a Square, so the second area() is its too.
+        ['3:10', '10:7', '11:14']);
   });
 
   it('completes and describes members of an inferred receiver', async () => {
@@ -125,5 +125,48 @@ describe('receiver types', () => {
     }
     assert.equal(typeMethodSignature(type, 'grow', analyzer)?.label, 'grow()');
     assert.equal(typeMethodSignature(type, 'hash', analyzer)?.label, 'hash()');
+  });
+});
+
+describe('return types', () => {
+  it('follows what functions and methods return', async () => {
+    const info = await open(
+        'returns.zn', ...SHAPES, 'class Builder {', '  field side',
+        '  method with_side(s) {', '    side = s', '    return self', '  }',
+        '  method build() Square(side)', '}', 'function unit() {', '  return Square(1)', '}',
+        'a = Builder().with_side(2).build().area()', 'b = unit().grow()');
+    assert.equal(declarationAt(info, 20, 15), 'returns.zn:11:10');
+    assert.equal(declarationAt(info, 20, 28), 'returns.zn:15:10');
+    assert.equal(declarationAt(info, 20, 36), 'returns.zn:3:10');
+    assert.equal(declarationAt(info, 21, 12), 'returns.zn:7:10');
+  });
+});
+
+describe('unknown members', () => {
+  async function problems(name: string, ...lines: string[]) {
+    const info = await open(name, ...SHAPES, ...lines);
+    return info.problems.filter(p => p.code === 'unknown-member')
+        .map(p => `${p.row! + 1}:${p.col! + 1} ${p.message} ${p.suggestions?.includes('area')}`);
+  }
+
+  it('reports members a known class doesn\'t have', async () => {
+    assert.deepEqual(
+        await problems('unknown.zn', 's = Square(1)', 'a = s.aera()', 'b = s.side', 'c = s.hash()'),
+        ['10:7 \'Square\' has no member \'aera\'. true']);
+  });
+
+  it('allows members assigned or set elsewhere', async () => {
+    assert.deepEqual(
+        await problems('assigned.zn', 's = Square(1)', 's.extra = 2', 'a = s.extra'), []);
+    assert.deepEqual(
+        await problems('set.zn', 's = Square(1)', 's.$set(\'extra\', 2)', 'a = s.extra'), []);
+  });
+
+  it('allows members of classes that may have more', async () => {
+    assert.deepEqual(
+        await problems(
+            'open.zn', 'class Sub : missing.Base {}', 'class Ann {}', 'x = Sub().anything',
+            't = \'text\'', 'u = t.anything'),
+        []);
   });
 });
