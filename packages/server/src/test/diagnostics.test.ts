@@ -83,6 +83,19 @@ describe('undefined names', () => {
   });
 });
 
+describe('builtin\'s imports', () => {
+  it('are visible in every module, as the runtime looks names up in builtin\'s members', async () => {
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([], async () => [
+      {name: 'builtin', path: '/stdlib/builtin.zn', text: 'import io\nfunction cat(args) args\n'},
+      {name: 'io', path: '/stdlib/io.zn', text: 'function println(a) a\n'},
+    ]);
+    const info = await analyzer.parseDocument(
+        {textDocument: {uri: 'file:///uses_io.zn'}, text: 'io.println(1)\nnet.x()\n'});
+    assert.deepEqual(info.problems.map(p => p.message), ['\'net\' is not defined.']);
+  });
+});
+
 describe('top-level variables in functions', () => {
   it('reports a top-level variable used in a function', async () => {
     assert.deepEqual(await problems('limit = 3', 'function f() limit'), [

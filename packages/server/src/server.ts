@@ -146,6 +146,10 @@ function loadLibs(libraryPath: string|undefined) {
 
 // Whether the client can be asked to watch files for the server.
 let canWatchFiles = false;
+// Whether the client can be asked to request semantic tokens again.
+let canRefreshTokens = false;
+// Whether the client tells the server about workspace folder changes.
+let hearsFolderChanges = false;
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
   const libraryPath = params.initializationOptions?.libraryPath as string |
@@ -153,6 +157,9 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   analyzer.init(params.workspaceFolders ?? [], () => loadLibs(libraryPath));
   canWatchFiles = params.capabilities.workspace?.didChangeWatchedFiles
                       ?.dynamicRegistration === true;
+  canRefreshTokens =
+      params.capabilities.workspace?.semanticTokens?.refreshSupport === true;
+  hearsFolderChanges = params.capabilities.workspace?.workspaceFolders === true;
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -174,6 +181,9 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       codeActionProvider: {codeActionKinds: [CodeActionKind.QuickFix]},
       completionProvider: {triggerCharacters: ['.']},
       signatureHelpProvider: {triggerCharacters: ['(', ','], retriggerCharacters: [',']},
+      workspace: {
+        workspaceFolders: {supported: true, changeNotifications: true},
+      },
     },
   };
 });
@@ -186,11 +196,57 @@ connection.onInitialized(async () => {
         DidChangeWatchedFilesNotification.type,
         {watchers: [{globPattern: '**/*.zn'}]});
   }
+  if (hearsFolderChanges) {
+    connection.workspace.onDidChangeWorkspaceFolders(async event => {
+      for (const folder of event.removed) {
+        analyzer.removeWorkspaceFolder(folder);
+      }
+      for (const folder of event.added) {
+        await analyzer.addWorkspaceFolder(folder);
+      }
+      // Imports may now resolve differently.
+      await refreshOpenDocuments(documents.all().map(d => filePathOf(d.uri)));
+    });
+  }
   const start = Date.now();
   const count = await analyzer.indexWorkspace();
   connection.console.log(
       `Indexed ${count} Zinnia files in ${Date.now() - start} ms.`);
+  // Documents opened while indexing may import modules indexed after them.
+  await refreshOpenDocuments(documents.all().map(d => filePathOf(d.uri)));
 });
+
+// Reanalyzes the open documents at [paths] with their current text, e.g.
+// after a module they import changed, and sends their diagnostics again.
+async function refreshOpenDocuments(paths: string[]): Promise<void> {
+  const refreshed = documents.all().filter(
+      document => paths.includes(filePathOf(document.uri)));
+  if (refreshed.length === 0) {
+    return;
+  }
+  await Promise.all(refreshed.map(async document => {
+    const info = analyzer.parseDocument(
+        {textDocument: {uri: document.uri}, text: document.getText()});
+    analyses.set(document.uri, {version: document.version, info: info});
+    publishDiagnostics(document, await info);
+  }));
+  if (canRefreshTokens) {
+    connection.languages.semanticTokens.refresh();
+  }
+}
+
+// After an open document is edited, the files that import it are
+// reanalyzed against its new analysis, once edits pause.
+const importerRefreshes = new Map<string, ReturnType<typeof setTimeout>>();
+const IMPORTER_REFRESH_DELAY_MS = 300;
+
+function refreshImportersSoon(filePath: string): void {
+  clearTimeout(importerRefreshes.get(filePath));
+  importerRefreshes.set(filePath, setTimeout(() => {
+    importerRefreshes.delete(filePath);
+    refreshOpenDocuments(analyzer.reanalyzeImportersOf(filePath));
+  }, IMPORTER_REFRESH_DELAY_MS));
+}
 
 connection.onDidChangeWatchedFiles(params => {
   for (const change of params.changes) {
@@ -198,11 +254,10 @@ connection.onDidChangeWatchedFiles(params => {
     if (!filePath.endsWith('.zn')) {
       continue;
     }
-    if (change.type === FileChangeType.Deleted) {
-      analyzer.forgetFile(filePath);
-    } else {
-      analyzer.refreshFile(filePath);
-    }
+    const reanalyzed = change.type === FileChangeType.Deleted ?
+        analyzer.forgetFile(filePath) :
+        analyzer.refreshFile(filePath);
+    refreshOpenDocuments(reanalyzed);
   }
 });
 
@@ -217,6 +272,11 @@ documents.onDidChangeContent(async change => {
   if (documents.get(document.uri)?.version !== document.version) {
     return;
   }
+  publishDiagnostics(document, info);
+  refreshImportersSoon(info.path);
+});
+
+function publishDiagnostics(document: TextDocument, info: SemanticDocInfo): void {
   const end = document.positionAt(document.getText().length);
   const diagnostics: Diagnostic[] = info.problems.map(problem => {
     const start = problem.row === undefined ?
@@ -238,11 +298,13 @@ documents.onDidChangeContent(async change => {
     };
   });
   connection.sendDiagnostics({uri: document.uri, diagnostics: diagnostics});
-});
+}
 
 documents.onDidClose(event => {
   analyses.delete(event.document.uri);
-  analyzer.setOpen(filePathOf(event.document.uri), false);
+  // Once closed, it's analyzed from disk again, and so are the files that
+  // import it.
+  refreshOpenDocuments(analyzer.setOpen(filePathOf(event.document.uri), false));
   connection.sendDiagnostics({uri: event.document.uri, diagnostics: []});
 });
 
