@@ -48,6 +48,9 @@ follows changes made in the editor and on disk.
 Classes are inferred from what's assigned: `x = Foo()`, `module.Foo()`,
 literals, other variables, fields assigned in methods, and `self` in a method.
 When a variable is assigned values of different classes, it isn't inferred.
+Declared functions, methods and fields can give their classes, as in
+`declare method copy() returns String` and `declare field message is String`;
+the standard library's declarations do, so `s.split(',').len()` is followed.
 
 ## Installing
 

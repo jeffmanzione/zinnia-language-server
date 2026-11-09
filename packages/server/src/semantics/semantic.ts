@@ -1,7 +1,7 @@
 
 import {SemanticAnalyzer, SemanticDocInfo} from './analyzer';
 import {AddChainExpr, MemberAccessExpr, AndChainExpr, AnnotationExpr, AnonExpr, ArrayExpr, AssignArrayExpr, AssignBaseExpr, AssignLhsExpr, AssignTupleExpr, BinaryChainExpr, ConditionBaseExpr, ConstantExpr, EqualChainExpr, Expression, IdentifierExpr, InExpr, isConstantExpr, LengthExpr, IsExpr, isPostfixExpr, MapExpr, MultChainExpr, NamedArgExpr, NewExpr, OrChainExpr, ParamExpr, ParensExpr, PostfixChainExpr, RangeExpr, RelationChainExpr, StringExpr, TupleChainExpr, UnaryChainExpr} from './expressions';
-import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
+import {ClassStat, CompoundStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, TypeAnnotation, WhileStat} from './statements';
 import {NATIVE_CLASSES, NATIVE_FUNCTIONS, NATIVE_METHODS, nativeMethodsOf} from './natives';
 import {Token, TokenKind} from './tokenizer';
 
@@ -67,6 +67,9 @@ export class SemanticIdentifier {
   // Whether this is declared with `declare`: it exists at runtime, but its
   // code isn't in source.
   isDeclared = false;
+  // For a declared function or method, the class it returns (`returns A`);
+  // for a declared field, the class it holds (`is A`).
+  declaredType?: SemanticExpression;
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -308,6 +311,8 @@ export interface SemanticField {
   ast: FieldStat|ParamExpr;
   token: Token;
   name: SemanticIdentifier;
+  // For a declared field, the class it holds, as in `is A`.
+  type?: SemanticExpression;
 }
 
 export interface SemanticStatic {
@@ -329,6 +334,8 @@ export interface SemanticMethod {
   params: SemanticParam[];
   // None for a declared method.
   stat?: SemanticStatement;
+  // For a declared method, the class it returns, as in `returns A`.
+  returnType?: SemanticExpression;
   annots: SemanticAnnotation[];
   className: string;
 }
@@ -401,6 +408,8 @@ interface SemanticFunction {
   params: SemanticParam[];
   // None for a declared function.
   stat?: SemanticStatement;
+  // For a declared function, the class it returns, as in `returns A`.
+  returnType?: SemanticExpression;
   annots: SemanticAnnotation[];
 }
 
@@ -910,6 +919,9 @@ function inferIdentifierType(
   if (id.type === 'class' || id.type === 'function' || id.type === 'method') {
     return undefined;
   }
+  if (id.declaredType !== undefined) {
+    return typeNamedBy(id.declaredType);
+  }
   let result: InferredType|undefined;
   for (const value of id.assignments) {
     if (isConstantExpr(value.ast as Expression)) {
@@ -929,6 +941,10 @@ function inferIdentifierType(
 function inferReturnType(
     id: SemanticIdentifier, analyzer: SemanticAnalyzer,
     depth: number): InferredType|undefined {
+  const declaredType = resolved(id).declaredType;
+  if (declaredType !== undefined) {
+    return typeNamedBy(declaredType);
+  }
   let result: InferredType|undefined;
   for (const ret of resolved(id).returns) {
     if (ret.value !== undefined && isConstantExpr(ret.value.ast as Expression)) {
@@ -1021,12 +1037,40 @@ function walkChain(
 
 // The class [cls] extends, if it's known.
 function superclassOf(cls: SemanticClass): SemanticClass|undefined {
-  const sup = cls.superName;
-  if (sup instanceof SemanticIdentifier) {
-    return resolved(sup).cls;
+  return classNamedBy(cls.superName);
+}
+
+// The declared type of [id], a declared function, method or field, as written,
+// e.g. `A` or `module.A`.
+export function declaredTypeName(id: SemanticIdentifier): string|undefined {
+  const type = resolved(id).declaredType;
+  if (type instanceof SemanticIdentifier) {
+    return type.ast?.token.text ?? type.id;
   }
-  if (sup !== undefined && sup.ast.kind === 'PostfixChainExpr') {
-    const postfix = sup as SemanticPostfix;
+  if (type !== undefined && type.ast.kind === 'PostfixChainExpr') {
+    const ast = type.ast;
+    return [ast.lhs, ...ast.postfixes]
+        .map(p => p.kind === 'MemberAccessExpr' ? p.field.token.text :
+                  p.kind === 'IdentifierExpr'   ? p.token.text :
+                                                  '')
+        .join('.');
+  }
+  return undefined;
+}
+
+// The class of the values of a declared type, as in `returns A`, if it's known.
+function typeNamedBy(type: SemanticExpression): InferredType|undefined {
+  const cls = classNamedBy(type);
+  return cls && {name: cls.name.id, cls: cls};
+}
+
+// The class [expr] names, as in `A` or `module.A`, if it's known.
+function classNamedBy(expr: SemanticExpression|undefined): SemanticClass|undefined {
+  if (expr instanceof SemanticIdentifier) {
+    return resolved(expr).cls;
+  }
+  if (expr !== undefined && expr.ast.kind === 'PostfixChainExpr') {
+    const postfix = expr as SemanticPostfix;
     const pfxs = postfix.ast.postfixes;
     if (postfix.base instanceof SemanticIdentifier &&
         pfxs.every(p => p.kind === 'MemberAccessExpr')) {
@@ -1380,6 +1424,7 @@ function generateTokensForMethod(
   if (meth.ast.declareTok != null) {
     generator.createToken(meth.ast.declareTok, 'keyword');
   }
+  generateTokensForType(meth.ast.returnType, meth.returnType, context, generator);
   if (meth.stat !== undefined) {
     generateTokensForStatement(meth.stat, context, generator);
   }
@@ -1422,11 +1467,25 @@ function generateTokensForClass(
     generateTokensForIdentifier(field.name, context, generator, cls.name.id);
     if (field.ast.kind === 'ParamExpr') {
       generator.createToken(field.ast.field!, 'keyword');
+    } else {
+      const i = field.ast.fields.findIndex(f => f.token === field.token);
+      generateTokensForType(field.ast.types[i], field.type, context, generator);
     }
   }
   for (const [_, meth] of cls.methods) {
     generateTokensForMethod(meth, context, generator);
   }
+}
+
+// Generates the tokens of a type annotation, as in `returns A`.
+function generateTokensForType(
+    ast: TypeAnnotation|undefined, type: SemanticExpression|undefined,
+    context: SemanticContext, generator: TokenGenerator): void {
+  if (ast === undefined || type === undefined) {
+    return;
+  }
+  generator.createToken(ast.keyword, 'keyword');
+  generateTokensForExpression(type, context, generator);
 }
 
 function generateTokensForFunction(
@@ -1456,6 +1515,7 @@ function generateTokensForFunction(
   if (func.ast.declareTok != null) {
     generator.createToken(func.ast.declareTok, 'keyword');
   }
+  generateTokensForType(func.ast.returnType, func.returnType, context, generator);
   if (func.stat !== undefined) {
     generateTokensForStatement(func.stat, context, generator);
   }
@@ -1918,6 +1978,10 @@ function processFunction(
   if (stat.declareTok !== undefined) {
     name.isDeclared = true;
   }
+  const returnType = stat.returnType && processExpression(stat.returnType.type, context);
+  if (returnType !== undefined) {
+    name.declaredType = returnType;
+  }
   const body = stat.stat && processStatement(stat.stat, newContext);
   if (stat.stat !== undefined) {
     recordExpressionBody(name, stat.stat, body);
@@ -1927,6 +1991,7 @@ function processFunction(
     name: name,
     params: params,
     stat: body,
+    returnType: returnType,
     annots: annots
   };
 }
@@ -2163,16 +2228,22 @@ function processImport(
 function processFields(
     stat: FieldStat, context: SemanticContext): SemanticField[] {
   const fields: SemanticField[] = [];
-  for (const id of stat.fields) {
-    fields.push({
+  stat.fields.forEach((id, i) => {
+    const typeAst = stat.types[i];
+    const field: SemanticField = {
       ast: stat,
       token: id.token,
-      name: processIdentifier(id, context, 'property')
-    });
+      name: processIdentifier(id, context, 'property'),
+      type: typeAst && processExpression(typeAst.type, context),
+    };
+    fields.push(field);
     if (stat.declareTok !== undefined) {
-      fields[fields.length - 1].name.isDeclared = true;
+      field.name.isDeclared = true;
     }
-  }
+    if (field.type !== undefined) {
+      resolved(field.name).declaredType = field.type;
+    }
+  });
   return fields;
 }
 
@@ -2225,6 +2296,10 @@ function processMethod(
   if (stat.stat === undefined) {
     name.isDeclared = true;
   }
+  const returnType = stat.returnType && processExpression(stat.returnType.type, context);
+  if (returnType !== undefined) {
+    name.declaredType = returnType;
+  }
   const body = stat.stat && processStatement(stat.stat, newContext);
   if (stat.stat !== undefined && stat.name.kind !== 'NewExpr') {
     recordExpressionBody(name, stat.stat, body);
@@ -2234,6 +2309,7 @@ function processMethod(
     name: name,
     params: params,
     stat: body,
+    returnType: returnType,
     className: classStat.name.token.text,
     annots
   };
