@@ -59,7 +59,21 @@
 		"configurationDefaults": {
 			"[zinnia]": {
 				"editor.tabSize": 2,
-				"editor.insertSpaces": true
+				"editor.insertSpaces": true,
+				"editor.semanticHighlighting.enabled": true
+			},
+			"editor.semanticTokenColorCustomizations": {
+				"rules": {
+					"*.defaultLibrary:zinnia": {
+						"foreground": "#69e281"
+					},
+					"parameter:zinnia": {
+						"foreground": "#c29c4c"
+					},
+					"property:zinnia": {
+						"foreground": "#51bcff"
+					}
+				}
 			}
 		},
 		"grammars": [
