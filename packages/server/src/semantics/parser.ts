@@ -1131,7 +1131,9 @@ class Parser {
     }
   }
 
-  private functionStat(i: number): Result<FunctionStat> {
+  // Parses a function, or with [declareTok], a declared function, which has
+  // no body.
+  private functionStat(i: number, declareTok?: Token): Result<FunctionStat> {
     const annots = this.annotations(i);
     const defTok = this.tok(annots.i, TokenKind.KEYWORD_FUNCTION);
     const name = defTok && this.identifier(defTok.i);
@@ -1145,13 +1147,14 @@ class Parser {
       return undefined;
     }
     const asyncTok = this.tok(rparen.i, TokenKind.KEYWORD_ASYNC);
-    const stat = this.statement(asyncTok?.i ?? rparen.i);
-    if (stat === undefined) {
+    const stat = declareTok ? undefined : this.statement(asyncTok?.i ?? rparen.i);
+    if (stat === undefined && !declareTok) {
       return undefined;
     }
     return {
       v: {
         kind: 'FunctionStat',
+        declareTok: declareTok,
         defTok: defTok!.v,
         name: name!.v,
         lparen: lparen.v,
@@ -1159,14 +1162,16 @@ class Parser {
         params: params.v.params,
         isNamed: params.v.isNamed,
         asyncTok: asyncTok?.v,
-        stat: stat.v,
+        stat: stat?.v,
         annots: annots.v
       },
-      i: stat.i
+      i: stat?.i ?? asyncTok?.i ?? rparen.i
     };
   }
 
-  private method(i: number): Result<MethodStat> {
+  // Parses a method or constructor. A [bodiless] one, which is declared, has no
+  // body and may leave out `method`, as in `declare copy()`.
+  private method(i: number, bodiless = false, declareTok?: Token): Result<MethodStat> {
     const annots = this.annotations(i);
     let methodTok: Token|undefined;
     let name: IdentifierExpr|NewExpr|SpecialMethodIdentifierExpr;
@@ -1180,11 +1185,18 @@ class Parser {
       j = methodName.i;
     } else {
       const newTok = this.newExpr(annots.i);
-      if (newTok === undefined) {
+      const shorthand = newTok === undefined && bodiless ?
+          this.identifier(annots.i) :
+          undefined;
+      if (newTok !== undefined) {
+        name = newTok.v;
+        j = newTok.i;
+      } else if (shorthand !== undefined) {
+        name = shorthand.v;
+        j = shorthand.i;
+      } else {
         return undefined;
       }
-      name = newTok.v;
-      j = newTok.i;
     }
     const lparen = this.tok(j, TokenKind.SYMBOL_LPAREN);
     if (lparen === undefined) {
@@ -1196,13 +1208,14 @@ class Parser {
       return undefined;
     }
     const asyncTok = this.tok(rparen.i, TokenKind.KEYWORD_ASYNC);
-    const stat = this.statement(asyncTok?.i ?? rparen.i);
-    if (stat === undefined) {
+    const stat = bodiless ? undefined : this.statement(asyncTok?.i ?? rparen.i);
+    if (stat === undefined && !bodiless) {
       return undefined;
     }
     return {
       v: {
         kind: 'MethodStat',
+        declareTok: declareTok,
         methodTok: methodTok,
         name: name,
         lparen: lparen.v,
@@ -1210,10 +1223,10 @@ class Parser {
         params: params.v.params,
         isNamed: params.v.isNamed,
         asyncTok: asyncTok?.v,
-        stat: stat.v,
+        stat: stat?.v,
         annots: annots.v
       },
-      i: stat.i
+      i: stat?.i ?? asyncTok?.i ?? rparen.i
     };
   }
 
@@ -1284,7 +1297,7 @@ class Parser {
     });
   }
 
-  private field(i: number): Result<FieldStat> {
+  private field(i: number, declareTok?: Token): Result<FieldStat> {
     const fieldTok = this.tok(i, TokenKind.KEYWORD_FIELD);
     const fields = fieldTok &&
         this.list(fieldTok.i, j => this.identifier(j), TokenKind.SYMBOL_COMMA);
@@ -1292,7 +1305,7 @@ class Parser {
       return undefined;
     }
     return {
-      v: {kind: 'FieldStat', fieldTok: fieldTok!.v, fields: fields.v},
+      v: {kind: 'FieldStat', declareTok: declareTok, fieldTok: fieldTok!.v, fields: fields.v},
       i: fields.i
     };
   }
@@ -1317,14 +1330,23 @@ class Parser {
     };
   }
 
-  private classMember(i: number): Result<ClassMemberStat> {
+  // Parses a member of a class. The members of a declared class
+  // ([inDeclaredClass]) have no bodies, as do members declared with `declare`.
+  private classMember(i: number, inDeclaredClass = false): Result<ClassMemberStat> {
     const j = this.lines(i);
-    const r: Result<ClassMemberStat> =
+    const declareTok = this.tok(j, TokenKind.KEYWORD_DECLARE);
+    const r: Result<ClassMemberStat> = declareTok !== undefined ?
+        this.method(declareTok.i, true, declareTok.v) ??
+            this.field(declareTok.i, declareTok.v) :
+        inDeclaredClass ?
+        this.method(j, true) ?? this.field(j) :
         this.method(j) ?? this.field(j) ?? this.staticStat(j);
     return r && {v: r.v, i: this.lines(r.i)};
   }
 
-  private classStat(i: number): Result<ClassStat> {
+  // Parses a class, or with [declareTok], a declared class, whose members have
+  // no bodies.
+  private classStat(i: number, declareTok?: Token): Result<ClassStat> {
     const annots = this.annotations(i);
     const classTok = this.tok(annots.i, TokenKind.KEYWORD_CLASS);
     const name = classTok && this.identifier(classTok.i);
@@ -1340,7 +1362,8 @@ class Parser {
     const lbrace = this.tok(this.lines(j), TokenKind.SYMBOL_LBRACE);
     if (lbrace !== undefined) {
       const body = this.items(
-          this.lines(lbrace.i), k => this.classMember(k), /*inBlock=*/ true);
+          this.lines(lbrace.i), k => this.classMember(k, declareTok !== undefined),
+          /*inBlock=*/ true);
       const end = this.lines(body.i);
       const rbrace: Result<Token> = this.tok(end, TokenKind.SYMBOL_RBRACE) ??
           this.closedAt(this.closeUnclosedBlock(lbrace.v, end), end);
@@ -1348,6 +1371,7 @@ class Parser {
         return {
           v: {
             kind: 'ClassStat',
+            declareTok: declareTok,
             classTok: classTok!.v,
             name: name.v,
             colon: superClass && colon!.v,
@@ -1361,8 +1385,8 @@ class Parser {
         };
       }
     }
-    // A class with a single member needs no braces.
-    const member = this.classMember(j);
+    // A class with a single member needs no braces, unless it's declared.
+    const member = declareTok ? undefined : this.classMember(j);
     if (member === undefined) {
       return undefined;
     }
@@ -1409,10 +1433,19 @@ class Parser {
     };
   }
 
+  // Parses a declared class or function: one that exists at runtime without
+  // code here.
+  private declared(i: number): Result<ClassStat|FunctionStat> {
+    const declareTok = this.tok(i, TokenKind.KEYWORD_DECLARE);
+    return declareTok &&
+        (this.classStat(declareTok.i, declareTok.v) ??
+         this.functionStat(declareTok.i, declareTok.v));
+  }
+
   private moduleItem(i: number): Result<Statement> {
     const j = this.lines(i);
-    const r: Result<Statement> = this.importStat(j) ?? this.classStat(j) ??
-        this.functionStat(j) ?? this.exit(j) ?? this.raise(j) ??
+    const r: Result<Statement> = this.importStat(j) ?? this.declared(j) ??
+        this.classStat(j) ?? this.functionStat(j) ?? this.exit(j) ?? this.raise(j) ??
         this.tryStat(j) ?? this.select(j) ?? this.compound(j) ??
         this.iter(j) ?? this.expression(j);
     return r && {v: r.v, i: this.lines(r.i)};

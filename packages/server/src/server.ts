@@ -20,7 +20,7 @@ import {documentSymbols, workspaceSymbols} from './symbols';
 
 const KEYWORDS = [
   'and',    'as',     'async',  'await',  'break', 'catch',  'class',
-  'const',  'continue', 'else', 'exit',   'False', 'field',  'for',
+  'const',  'continue', 'declare', 'else', 'exit',   'False', 'field',  'for',
   'function', 'if',   'import', 'in',     'is',    'method', 'new',
   'None',   'notin',  'or',     'raise',  'return', 'static', 'then',
   'True',   'try',    'while',

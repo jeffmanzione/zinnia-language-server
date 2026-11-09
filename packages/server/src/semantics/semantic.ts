@@ -64,6 +64,9 @@ export class SemanticIdentifier {
   // Whether this stands for a name used without a definition in source, such
   // as one defined natively (Int) or one that's undefined.
   isUndefined = false;
+  // Whether this is declared with `declare`: it exists at runtime, but its
+  // code isn't in source.
+  isDeclared = false;
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -324,7 +327,8 @@ export interface SemanticMethod {
   ast: MethodStat;
   name: SemanticIdentifier;
   params: SemanticParam[];
-  stat: SemanticStatement;
+  // None for a declared method.
+  stat?: SemanticStatement;
   annots: SemanticAnnotation[];
   className: string;
 }
@@ -395,7 +399,8 @@ interface SemanticFunction {
   ast: FunctionStat;
   name: SemanticIdentifier;
   params: SemanticParam[];
-  stat: SemanticStatement;
+  // None for a declared function.
+  stat?: SemanticStatement;
   annots: SemanticAnnotation[];
 }
 
@@ -1372,7 +1377,12 @@ function generateTokensForMethod(
       generateTokensForExpression(param.defaultValue, context, generator);
     }
   }
-  generateTokensForStatement(meth.stat, context, generator);
+  if (meth.ast.declareTok != null) {
+    generator.createToken(meth.ast.declareTok, 'keyword');
+  }
+  if (meth.stat !== undefined) {
+    generateTokensForStatement(meth.stat, context, generator);
+  }
 }
 
 function generateTokensForClass(
@@ -1384,6 +1394,9 @@ function generateTokensForClass(
     }
   }
 
+  if (cls.ast.declareTok != null) {
+    generator.createToken(cls.ast.declareTok, 'keyword');
+  }
   generator.createToken(cls.ast.classTok, 'keyword');
   generateTokensForIdentifier(cls.name, context, generator);
 
@@ -1400,6 +1413,9 @@ function generateTokensForClass(
   for (const classAst of cls.ast.stats) {
     if (classAst.kind === 'FieldStat') {
       generator.createToken(classAst.fieldTok, 'keyword');
+      if (classAst.declareTok != null) {
+        generator.createToken(classAst.declareTok, 'keyword');
+      }
     }
   }
   for (const field of cls.fields) {
@@ -1437,7 +1453,12 @@ function generateTokensForFunction(
       generateTokensForExpression(param.defaultValue, context, generator);
     }
   }
-  generateTokensForStatement(func.stat, context, generator);
+  if (func.ast.declareTok != null) {
+    generator.createToken(func.ast.declareTok, 'keyword');
+  }
+  if (func.stat !== undefined) {
+    generateTokensForStatement(func.stat, context, generator);
+  }
 }
 
 function generateTokensForStatement(
@@ -1894,8 +1915,13 @@ function processFunction(
     });
     recordDefault(params[params.length - 1]);
   }
-  const body = processStatement(stat.stat, newContext);
-  recordExpressionBody(name, stat.stat, body);
+  if (stat.declareTok !== undefined) {
+    name.isDeclared = true;
+  }
+  const body = stat.stat && processStatement(stat.stat, newContext);
+  if (stat.stat !== undefined) {
+    recordExpressionBody(name, stat.stat, body);
+  }
   return {
     ast: stat,
     name: name,
@@ -1908,7 +1934,7 @@ function processFunction(
 // Records the value of a function or method whose body is an expression, as
 // in `function f(x) x + 1`, as what it returns.
 function recordExpressionBody(
-    name: SemanticIdentifier, ast: Statement, body: SemanticStatement): void {
+    name: SemanticIdentifier, ast: Statement, body: SemanticStatement|undefined): void {
   if (body !== undefined && ast.kind !== 'CompoundStat' && ast.kind !== 'JumpStat' &&
       ast.kind !== 'RaiseStat' && ast.kind !== 'ExitStat' && ast.kind !== 'SelectStat' &&
       ast.kind !== 'WhileStat' && ast.kind !== 'ForStat' && ast.kind !== 'ForeachStat' &&
@@ -2143,6 +2169,9 @@ function processFields(
       token: id.token,
       name: processIdentifier(id, context, 'property')
     });
+    if (stat.declareTok !== undefined) {
+      fields[fields.length - 1].name.isDeclared = true;
+    }
   }
   return fields;
 }
@@ -2193,8 +2222,11 @@ function processMethod(
       resolved(fields[fields.length - 1].name).assignments.push(defaultValue);
     }
   }
-  const body = processStatement(stat.stat, newContext);
-  if (stat.name.kind !== 'NewExpr') {
+  if (stat.stat === undefined) {
+    name.isDeclared = true;
+  }
+  const body = stat.stat && processStatement(stat.stat, newContext);
+  if (stat.stat !== undefined && stat.name.kind !== 'NewExpr') {
     recordExpressionBody(name, stat.stat, body);
   }
   return {
@@ -2308,6 +2340,11 @@ function processModule(
       const cls = processClass(
           stat, name, context.newBlock('class', {classId: name}));
       name.cls = cls;
+      if (stat.declareTok !== undefined) {
+        // A declared class's members are all declared.
+        name.isDeclared = true;
+        cls.fields.forEach(f => resolved(f.name).isDeclared = true);
+      }
       classes.push(cls);
     }
   }
