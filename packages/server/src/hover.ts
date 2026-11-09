@@ -54,6 +54,28 @@ function moduleComment(text: string): string|undefined {
   return docComment(text, end);
 }
 
+// The doc comment of what [id], defined in [info], is an alias of, following
+// aliases of aliases.
+function aliasedDocComment(
+    id: SemanticIdentifier, info: SemanticDocInfo|undefined,
+    analyzer: SemanticAnalyzer, depth = 0): string|undefined {
+  const alias = id.aliasOf;
+  if (alias === undefined || depth > 5) {
+    return undefined;
+  }
+  const target = alias.module === undefined ?
+      info :
+      analyzer.lookupDocInfoFromModuleName(alias.module);
+  const definition = [...target?.context?.block.definitions() ?? []].find(
+      d => d.id === alias.name);
+  const declaration = definition && resolved(definition).tokens[0];
+  if (target === undefined || definition === undefined || declaration === undefined) {
+    return undefined;
+  }
+  return aliasedDocComment(resolved(definition), target, analyzer, depth + 1) ??
+      docComment(target.text, declaration.token.pos.rowBegin - 1);
+}
+
 // The class of [info] whose field, static or method [id] is.
 function owningClass(info: SemanticDocInfo|undefined, id: SemanticIdentifier):
     SemanticClass|undefined {
@@ -120,6 +142,12 @@ export function hoverMarkdown(
     parts.push(codeBlock(
         `${kind} ${owner ? `${owner.name.id}.` : ''}${id.id}` +
         (type ? `: ${type.name}` : '')));
+  }
+  // A member defined as another name, as in `self.sort = builtin_ext.sort`,
+  // is documented where that name is defined.
+  const aliasDoc = aliasedDocComment(id, declInfo, analyzer);
+  if (aliasDoc !== undefined) {
+    doc = aliasDoc;
   }
   if (doc !== undefined) {
     parts.push(doc);
