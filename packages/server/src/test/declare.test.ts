@@ -93,3 +93,83 @@ describe('declare', () => {
     assert.notDeepEqual(parseModule('class C {\n  method m()\n}\n').problems, []);
   });
 });
+
+describe('declared types', () => {
+  const TYPED = [
+    'import shapes',
+    '',
+    'declare class Box {',
+    '  field size is Box, label, square is shapes.Square',
+    '  method grow() returns Box',
+    '  method area() async returns Int',
+    '}',
+    '',
+    'class Partial {',
+    '  declare field box is Box',
+    '  declare method shape() returns shapes.Square',
+    '  declare copy() returns Partial',
+    '}',
+    '',
+    'declare function make() returns Box',
+    '',
+    'b = make()',
+    'b.grow().size.square.side()',
+    'p = Partial()',
+    'p.copy().box.grow()',
+    'p.shape().side()',
+    '',
+  ].join('\n');
+
+  let typed: SemanticDocInfo;
+  let typedAnalyzer: SemanticAnalyzer;
+
+  before(async () => {
+    typedAnalyzer = new SemanticAnalyzer();
+    await typedAnalyzer.init([], async () => [
+      {name: 'shapes', path: '/stdlib/shapes.zn', text: 'class Square {\n  method side() 1\n}\n'},
+    ]);
+    typed = await typedAnalyzer.parseDocument({textDocument: {uri: 'file:///typed.zn'}, text: TYPED});
+  });
+
+  function typedToken(row: number, text: string) {
+    return typed.tokens.find(t => t.row === row - 1 && t.text === text)!;
+  }
+
+  it('parses return types and field types', () => {
+    assert.deepEqual(parseModule(TYPED).problems, []);
+    assert.deepEqual(typed.problems, []);
+    assert.equal(typedToken(5, 'returns').type, 'keyword');
+    assert.equal(typedToken(4, 'is').type, 'keyword');
+  });
+
+  it('infers the classes of calls and fields from their declared types', () => {
+    const declaredAt = (row: number, text: string) => {
+      const declaration = typedToken(row, text).identifier?.tokens[0];
+      return declaration && `${declaration.filePath}:${declaration.token.pos.rowBegin}`;
+    };
+    assert.equal(declaredAt(18, 'grow'), '/typed.zn:5');
+    assert.equal(declaredAt(18, 'size'), '/typed.zn:4');
+    assert.equal(declaredAt(18, 'square'), '/typed.zn:4');
+    assert.equal(declaredAt(18, 'side'), '/stdlib/shapes.zn:2');
+    assert.equal(declaredAt(20, 'box'), '/typed.zn:10');
+    assert.equal(declaredAt(20, 'grow'), '/typed.zn:5');
+    assert.equal(declaredAt(21, 'side'), '/stdlib/shapes.zn:2');
+  });
+
+  it('links type names to their classes', () => {
+    assert.equal(typedToken(5, 'Box').identifier?.tokens[0].token.pos.rowBegin, 3);
+    assert.equal(typedToken(11, 'Square').identifier?.tokens[0].filePath, '/stdlib/shapes.zn');
+  });
+
+  it('shows declared types on hover', () => {
+    assert.equal(
+        hoverMarkdown(typed, typedToken(5, 'grow'), typedAnalyzer),
+        '```zinnia\ndeclare method Box.grow() returns Box\n```');
+    assert.equal(
+        hoverMarkdown(typed, typedToken(11, 'shape'), typedAnalyzer),
+        '```zinnia\ndeclare method Partial.shape() returns shapes.Square\n```');
+    assert.equal(
+        hoverMarkdown(typed, typedToken(10, 'box'), typedAnalyzer),
+        '```zinnia\ndeclare field Partial.box: Box\n```');
+  });
+});

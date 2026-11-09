@@ -2,7 +2,7 @@
 // written above its definition.
 
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
-import {inferType, resolved, SemanticClass, SemanticIdentifier, SemanticToken} from './semantics/semantic';
+import {declaredTypeName, inferType, resolved, SemanticClass, SemanticIdentifier, SemanticToken} from './semantics/semantic';
 import {identifierSignature, nativeSignature, receiverType} from './completion';
 import {nativeMethodsOf} from './semantics/natives';
 
@@ -128,9 +128,11 @@ export function hoverMarkdown(
     const owner = owningClass(declInfo, id);
     const signature = identifierSignature(token.text, id, declInfo, analyzer);
     const label = signature?.label ?? id.id;
+    const returnType = declaredTypeName(id);
     parts.push(codeBlock(
         (id.type === 'method' ? 'method ' : 'function ') +
-        (owner ? `${owner.name.id}.` : '') + label));
+        (owner ? `${owner.name.id}.` : '') + label +
+        (returnType ? ` returns ${returnType}` : '')));
   } else {
     const owner = owningClass(declInfo, id);
     const kind = id.type === 'property' ?

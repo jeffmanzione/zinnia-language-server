@@ -10,7 +10,7 @@
 // skipped, so the rest of the file still yields an AST.
 
 import {AddExpr, AndExpr, AnnotationExpr, AnonExpr, ArrayExpr, ArrayIndexExpr, AssignArrayExpr, AssignExpr, AssignLhsExpr, AssignTupleExpr, BinaryExpr, ConditionExpr, ConstantExpr, EmptyParensExpr, EqualExpr, Expression, FunctionCallExpr, IdentifierExpr, InExpr, IsExpr, LengthExpr, MapEntryExpr, MapExpr, MemberAccessExpr, MultExpr, NamedArgExpr, NewExpr, OrExpr, ParamExpr, ParensExpr, PostfixExpr, PostfixExpr1, PrimaryExpr, RelationExpr, StringExpr, TupleExpr, UnaryExpr} from './expressions';
-import {ClassMemberStat, ClassStat, CompoundStat, ExitStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, IterStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, WhileStat} from './statements';
+import {ClassMemberStat, ClassStat, CompoundStat, ExitStat, FieldStat, ForeachStat, ForStat, FunctionStat, ImportStat, IterStat, JumpStat, MethodStat, Module, RaiseStat, SelectStat, SpecialMethodIdentifierExpr, Statement, StaticStat, TryStat, TypeAnnotation, WhileStat} from './statements';
 import {Token, TokenKind, tokenize} from './tokenizer';
 
 // A problem found in a document. Rows and columns are 0-based. A problem with
@@ -1151,6 +1151,8 @@ class Parser {
     if (stat === undefined && !declareTok) {
       return undefined;
     }
+    const returnType = declareTok &&
+        this.typeAnnotation(asyncTok?.i ?? rparen.i, TokenKind.KEYWORD_RETURNS);
     return {
       v: {
         kind: 'FunctionStat',
@@ -1163,9 +1165,10 @@ class Parser {
         isNamed: params.v.isNamed,
         asyncTok: asyncTok?.v,
         stat: stat?.v,
+        returnType: returnType?.v,
         annots: annots.v
       },
-      i: stat?.i ?? asyncTok?.i ?? rparen.i
+      i: stat?.i ?? returnType?.i ?? asyncTok?.i ?? rparen.i
     };
   }
 
@@ -1212,6 +1215,9 @@ class Parser {
     if (stat === undefined && !bodiless) {
       return undefined;
     }
+    const returnType = bodiless ?
+        this.typeAnnotation(asyncTok?.i ?? rparen.i, TokenKind.KEYWORD_RETURNS) :
+        undefined;
     return {
       v: {
         kind: 'MethodStat',
@@ -1224,9 +1230,10 @@ class Parser {
         isNamed: params.v.isNamed,
         asyncTok: asyncTok?.v,
         stat: stat?.v,
+        returnType: returnType?.v,
         annots: annots.v
       },
-      i: stat?.i ?? asyncTok?.i ?? rparen.i
+      i: stat?.i ?? returnType?.i ?? asyncTok?.i ?? rparen.i
     };
   }
 
@@ -1297,15 +1304,53 @@ class Parser {
     });
   }
 
-  private field(i: number, declareTok?: Token): Result<FieldStat> {
+  // Parses a type annotation: [keyword] followed by a class name or
+  // module.ClassName, as in `returns A` or `is mod.A`.
+  private typeAnnotation(i: number, keyword: TokenKind): Result<TypeAnnotation> {
+    const kw = this.tok(i, keyword);
+    const name = kw && this.identifier(kw.i);
+    if (name === undefined) {
+      return undefined;
+    }
+    const period = this.tok(name.i, TokenKind.SYMBOL_PERIOD);
+    const member = period && this.identifier(period.i);
+    if (member === undefined) {
+      return {v: {keyword: kw!.v, type: name.v}, i: name.i};
+    }
+    const access: MemberAccessExpr =
+        {kind: 'MemberAccessExpr', field: member.v, period: period!.v};
+    return {
+      v: {
+        keyword: kw!.v,
+        type: {kind: 'PostfixChainExpr', lhs: name.v, postfixes: [access]}
+      },
+      i: member.i
+    };
+  }
+
+  // Parses a field statement. A declared one's fields may give their classes,
+  // as in `field a is A, b`.
+  private field(i: number, declareTok?: Token, declared = false):
+      Result<FieldStat> {
     const fieldTok = this.tok(i, TokenKind.KEYWORD_FIELD);
-    const fields = fieldTok &&
-        this.list(fieldTok.i, j => this.identifier(j), TokenKind.SYMBOL_COMMA);
+    const fields = fieldTok && this.list(fieldTok.i, j => {
+      const name = this.identifier(j);
+      const type = name && declared ?
+          this.typeAnnotation(name.i, TokenKind.KEYWORD_IS) :
+          undefined;
+      return name && {v: {name: name.v, type: type?.v}, i: type?.i ?? name.i};
+    }, TokenKind.SYMBOL_COMMA);
     if (fields === undefined) {
       return undefined;
     }
     return {
-      v: {kind: 'FieldStat', declareTok: declareTok, fieldTok: fieldTok!.v, fields: fields.v},
+      v: {
+        kind: 'FieldStat',
+        declareTok: declareTok,
+        fieldTok: fieldTok!.v,
+        fields: fields.v.map(f => f.name),
+        types: fields.v.map(f => f.type)
+      },
       i: fields.i
     };
   }
@@ -1337,9 +1382,9 @@ class Parser {
     const declareTok = this.tok(j, TokenKind.KEYWORD_DECLARE);
     const r: Result<ClassMemberStat> = declareTok !== undefined ?
         this.method(declareTok.i, true, declareTok.v) ??
-            this.field(declareTok.i, declareTok.v) :
+            this.field(declareTok.i, declareTok.v, true) :
         inDeclaredClass ?
-        this.method(j, true) ?? this.field(j) :
+        this.method(j, true) ?? this.field(j, undefined, true) :
         this.method(j) ?? this.field(j) ?? this.staticStat(j);
     return r && {v: r.v, i: this.lines(r.i)};
   }

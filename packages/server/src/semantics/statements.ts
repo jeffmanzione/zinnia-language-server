@@ -1,5 +1,5 @@
 import {Token, TokenKind} from './tokenizer';
-import { AnnotationExpr, AssignExpr, AssignLhsExpr, ConditionExpr, Expression, IdentifierExpr, NewExpr, ParamExpr, PostfixExpr, StringExpr, TupleExpr } from './expressions';
+import { AnnotationExpr, AssignExpr, AssignLhsExpr, ConditionExpr, Expression, IdentifierExpr, NewExpr, ParamExpr, PostfixChainExpr, PostfixExpr, StringExpr, TupleExpr } from './expressions';
 
 export interface ImportStat {
 	kind: 'ImportStat' | 'ImportAsStat';
@@ -90,6 +90,13 @@ export interface JumpStat {
 	expr?: TupleExpr;
 }
 
+// The class a declared function or method returns, as in `returns A`, or a
+// declared field holds, as in `is A`: a class name, or module.ClassName.
+export interface TypeAnnotation {
+	keyword: Token;
+	type: IdentifierExpr | PostfixChainExpr;
+}
+
 export interface FunctionStat {
 	kind: 'FunctionStat';
 	// For a declared function, which exists at runtime without code here.
@@ -103,6 +110,8 @@ export interface FunctionStat {
 	isNamed: boolean;
 	// None for a declared function.
 	stat?: Statement;
+	// For a declared function, the class it returns, if given.
+	returnType?: TypeAnnotation;
 	annots: AnnotationExpr[];
 }
 
@@ -124,6 +133,8 @@ export interface MethodStat {
 	isNamed: boolean;
 	// None for a declared method, or a method of a declared class.
 	stat?: Statement;
+	// For a declared method, the class it returns, if given.
+	returnType?: TypeAnnotation;
 	annots: AnnotationExpr[];
 }
 
@@ -132,6 +143,8 @@ export interface FieldStat {
 	declareTok?: Token;
 	fieldTok: Token;
 	fields: IdentifierExpr[];
+	// For a declared field, the class it holds, if given; one per field.
+	types: (TypeAnnotation | undefined)[];
 }
 
 export interface StaticStat {
