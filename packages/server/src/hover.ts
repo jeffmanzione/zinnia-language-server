@@ -149,6 +149,10 @@ export function hoverMarkdown(
   if (aliasDoc !== undefined) {
     doc = aliasDoc;
   }
+  // A declared name exists at runtime, but its code isn't in source.
+  if (id.isDeclared && parts.length > 0) {
+    parts[0] = parts[0].replace('```zinnia\n', '```zinnia\ndeclare ');
+  }
   if (doc !== undefined) {
     parts.push(doc);
   }

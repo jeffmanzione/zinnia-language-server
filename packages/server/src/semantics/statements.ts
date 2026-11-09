@@ -92,6 +92,8 @@ export interface JumpStat {
 
 export interface FunctionStat {
 	kind: 'FunctionStat';
+	// For a declared function, which exists at runtime without code here.
+	declareTok?: Token;
 	defTok: Token;
 	asyncTok?: Token;
 	lparen: Token;
@@ -99,7 +101,8 @@ export interface FunctionStat {
 	name: IdentifierExpr;
 	params: ParamExpr[];
 	isNamed: boolean;
-	stat: Statement;
+	// None for a declared function.
+	stat?: Statement;
 	annots: AnnotationExpr[];
 }
 
@@ -110,6 +113,8 @@ export interface SpecialMethodIdentifierExpr {
 
 export interface MethodStat {
 	kind: 'MethodStat';
+	// For a declared method, which exists at runtime without code here.
+	declareTok?: Token;
 	methodTok?: Token;
 	asyncTok?: Token;
 	lparen: Token;
@@ -117,12 +122,14 @@ export interface MethodStat {
 	name: IdentifierExpr | NewExpr | SpecialMethodIdentifierExpr;
 	params: ParamExpr[];
 	isNamed: boolean;
-	stat: Statement;
+	// None for a declared method, or a method of a declared class.
+	stat?: Statement;
 	annots: AnnotationExpr[];
 }
 
 export interface FieldStat {
 	kind: 'FieldStat';
+	declareTok?: Token;
 	fieldTok: Token;
 	fields: IdentifierExpr[];
 }
@@ -142,6 +149,8 @@ export type ClassMemberStat =
 
 export interface ClassStat {
 	kind: 'ClassStat';
+	// For a declared class, which exists at runtime without code here.
+	declareTok?: Token;
 	classTok: Token;
 	name: IdentifierExpr;
 	colon?: Token;
