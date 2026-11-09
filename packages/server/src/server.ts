@@ -9,7 +9,7 @@ import {callAt, classAt, classMembers, identifierSignature, memberAccessAt, modu
 import {foldingRanges} from './folding';
 import {formatRows, formatText} from './format';
 import {hoverMarkdown} from './hover';
-import {documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from './navigation';
+import {definitionOf, documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from './navigation';
 import {loadZinniaLibs} from './lib';
 import {filePathOf, SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {ImportStat} from './semantics/statements';
@@ -373,10 +373,11 @@ connection.onHover(async (params): Promise<Hover|null> => {
 
 connection.onDefinition(async (params): Promise<Definition|null> => {
   const info = await analysisFor(params.textDocument.uri);
-  const token = info && tokenAt(info, params.position);
-  // An identifier's first token is its declaration.
-  const declaration = token && identifierLocations(token)[0];
-  return declaration ?? null;
+  const definition =
+      info && definitionOf(info, tokenAt(info, params.position), analyzer);
+  return (definition &&
+          locationOf(definition.filePath, definition.row, definition.col, definition.length)) ??
+      null;
 });
 
 connection.onReferences(async (params): Promise<Location[]> => {
