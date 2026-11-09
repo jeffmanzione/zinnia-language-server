@@ -471,7 +471,7 @@ export class SemanticAnalyzer {
         return true;
       }
     }
-    const match = /(?:^|\/)zinnia\/lib\/([a-z_]+)\.zn$/.exec(filePath);
+    const match = /(?:^|\/)zinnia\/(?:stdlib|lib)\/([a-z_]+)\.zn$/.exec(filePath);
     return match !== null &&
         (this.libNamesToFilePaths_.size === 0 ||
          this.libNamesToFilePaths_.has(match[1]));

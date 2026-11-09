@@ -16,10 +16,17 @@ if [[ -z "$sha" ]]; then
   sha="$ref"  # Assume ref is already a commit.
 fi
 
-curl -sSfL "https://github.com/jeffmanzione/zinnia/archive/$sha.tar.gz" |
-  tar -xz -C "$tmp" --wildcards '*/zinnia/lib/*.zn'
+curl -sSfL -o "$tmp/zinnia.tar.gz" \
+  "https://github.com/jeffmanzione/zinnia/archive/$sha.tar.gz"
+# The library is in zinnia/stdlib, or zinnia/lib in older commits.
+dir=stdlib
+# (grep reads all of tar's output: with -q, tar's SIGPIPE would fail the pipe.)
+if ! tar -tzf "$tmp/zinnia.tar.gz" | grep '/zinnia/stdlib/.*\.zn$' >/dev/null; then
+  dir=lib
+fi
+tar -xzf "$tmp/zinnia.tar.gz" -C "$tmp" --wildcards "*/zinnia/$dir/*.zn"
 
 rm -f "$dest"/*.zn
-cp "$tmp"/*/zinnia/lib/*.zn "$dest/"
+cp "$tmp"/*/zinnia/$dir/*.zn "$dest/"
 echo "$sha" > "$dest/ZINNIA_COMMIT"
 echo "Updated $dest to zinnia $sha."

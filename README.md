@@ -108,14 +108,14 @@ so files aren't highlighted there; the other features work.
 ## Standard library
 
 The server bundles a copy of the
-[Zinnia standard library](https://github.com/jeffmanzione/zinnia/tree/master/zinnia/lib)
+[Zinnia standard library](https://github.com/jeffmanzione/zinnia/tree/master/zinnia/stdlib)
 in `packages/server/stdlib`. The commit it was copied from is in
 `packages/server/stdlib/ZINNIA_COMMIT`. A weekly workflow opens a pull request
 when zinnia's copy changes.
 
 To use a different copy, for example the one in your own checkout of zinnia,
 set `zinnia.libraryPath` (or the `libraryPath` initialization option) to its
-directory, e.g. `/path/to/zinnia/zinnia/lib`, and restart the server.
+directory, e.g. `/path/to/zinnia/zinnia/stdlib`, and restart the server.
 
 Methods and functions that Zinnia implements in C, which aren't in the
 library's source, are listed in `packages/server/src/semantics/natives.ts`.
