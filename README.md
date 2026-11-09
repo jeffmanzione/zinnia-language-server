@@ -9,6 +9,9 @@ that speaks the [Language Server Protocol](https://microsoft.github.io/language-
 - **Highlighting**: a TextMate grammar, plus semantic highlighting that tells
   classes, functions, methods, fields, parameters, modules and constants
   apart.
+  By default, modules are green, parameters gold and fields blue in every
+  theme; to change them, set `editor.semanticTokenColorCustomizations` rules
+  such as `"parameter:zinnia": {"foreground": "#..."}`.
 - **Diagnostics**, as you type:
   - syntax errors, with recovery so the rest of the file is still analyzed;
   - undefined names, with quick fixes to import a missing module or change
