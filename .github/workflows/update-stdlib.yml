@@ -1,5 +1,5 @@
 # Keeps the bundled copy of the Zinnia standard library in sync with zinnia:
-# each week, copies zinnia/lib from jeffmanzione/zinnia's master branch and,
+# each week, copies zinnia/stdlib from jeffmanzione/zinnia's master branch and,
 # if it changed and the tests still pass, opens a pull request.
 #
 # GitHub doesn't run other workflows on pull requests that a workflow opens
@@ -57,4 +57,4 @@ jobs:
           commit-message: Update the bundled standard library to zinnia ${{ steps.update.outputs.commit }}
           title: Update the bundled standard library
           body: |
-            Copies `zinnia/lib` from jeffmanzione/zinnia@${{ steps.update.outputs.commit }} into `packages/server/stdlib`, with `scripts/update-stdlib.sh`. The tests pass with it.
+            Copies `zinnia/stdlib` from jeffmanzione/zinnia@${{ steps.update.outputs.commit }} into `packages/server/stdlib`, with `scripts/update-stdlib.sh`. The tests pass with it.

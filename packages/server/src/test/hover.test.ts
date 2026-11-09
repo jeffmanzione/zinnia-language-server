@@ -112,3 +112,21 @@ describe('hover', () => {
     assert.equal(hoverAt(15, 7), code('method String.split(delim)'));
   });
 });
+
+describe('hover on aliases', () => {
+  it('shows the doc comment of what a module member aliases', async () => {
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([], async () => [
+      {name: 'builtin', path: '/stdlib/builtin.zn',
+       text: 'import builtin_ext\n; See builtin_ext.sort().\nself.sort = builtin_ext.sort\n'},
+      {name: 'builtin_ext', path: '/stdlib/builtin_ext.zn',
+       text: '; Sorts [seq].\nfunction sort(seq) seq\n'},
+    ]);
+    const info = await analyzer.parseDocument(
+        {textDocument: {uri: 'file:///alias.zn'}, text: 'x = sort([1])\n'});
+    const token = info.tokens.find(t => t.text === 'sort' && t.identifier !== undefined)!;
+    assert.equal(
+        hoverMarkdown(info, token, analyzer),
+        '```zinnia\nfunction sort(seq)\n```\n\nSorts `seq`.');
+  });
+});
