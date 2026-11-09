@@ -135,3 +135,44 @@ describe('importers and workspace folders', () => {
     assert.ok(analyzer.lookupDocInfoFromFile(path.join(workspace, 'shapes.zn')) !== undefined);
   });
 });
+
+describe('standard library modules opened in the editor', () => {
+  it('keep definitions in other files working, and follow edits', async () => {
+    const libDir = mkdtempSync(path.join(tmpdir(), 'zinnia-lib-'));
+    const libPath = (name: string) => path.join(libDir, name + '.zn');
+    writeFileSync(libPath('builtin'), 'import io\nfunction cat(args) args\n');
+    writeFileSync(libPath('io'), 'function println(a) a\n');
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([{uri: 'file://' + workspace, name: 'workspace'}], async () => [
+      {name: 'builtin', path: libPath('builtin'), text: 'import io\nfunction cat(args) args\n'},
+      {name: 'io', path: libPath('io'), text: 'function println(a) a\n'},
+    ]);
+    const user = path.join(workspace, 'uses_io.zn');
+    await analyzer.parseDocument(
+        {textDocument: {uri: 'file://' + user}, text: 'io.println(1)\n'});
+    const definition = () => {
+      const token = analyzer.lookupDocInfoFromFile(user)!.tokens.find(t => t.text === 'println')!;
+      const declaration = token.identifier?.tokens[0];
+      return declaration && `${path.basename(declaration.filePath)}:${declaration.token.pos.rowBegin}`;
+    };
+    assert.equal(definition(), 'io.zn:1');
+
+    // Opened unchanged, as for a definition: its analysis is kept.
+    const io = libPath('io');
+    const before = analyzer.lookupDocInfoFromFile(io);
+    analyzer.setOpen(io, true);
+    assert.equal(
+        await analyzer.parseDocument({textDocument: {uri: 'file://' + io}, text: 'function println(a) a\n'}),
+        before);
+    assert.equal(definition(), 'io.zn:1');
+
+    // Edited: every workspace file is reanalyzed against it.
+    await analyzer.parseDocument({textDocument: {uri: 'file://' + io}, text: '\nfunction println(a) a\n'});
+    assert.ok(analyzer.reanalyzeImportersOf(io).includes(user));
+    assert.equal(definition(), 'io.zn:2');
+
+    // Closed: its text on disk again.
+    analyzer.setOpen(io, false);
+    assert.equal(definition(), 'io.zn:1');
+  });
+});
