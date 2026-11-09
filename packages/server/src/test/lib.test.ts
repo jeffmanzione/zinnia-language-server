@@ -1,7 +1,7 @@
 import * as assert from 'node:assert/strict';
 import {describe, it} from 'node:test';
 
-import {loadZinniaLibs} from '../lib';
+import {loadZinniaLibs, normalizePath} from '../lib';
 import {SemanticAnalyzer} from '../semantics/analyzer';
 
 describe('standard library', () => {
@@ -19,5 +19,12 @@ describe('standard library', () => {
     const io = analyzer.lookupDocInfoFromModuleName('io');
     assert.ok(io !== undefined && io.path.endsWith('/stdlib/io.zn'));
     assert.deepEqual(io.problems, []);
+  });
+});
+
+describe('normalizePath', () => {
+  it('uses / and a lowercase drive letter', () => {
+    assert.equal(normalizePath('C:\\Users\\me\\io.zn'), 'c:/Users/me/io.zn');
+    assert.equal(normalizePath('/home/me/io.zn'), '/home/me/io.zn');
   });
 });

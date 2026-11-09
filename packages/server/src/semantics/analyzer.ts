@@ -4,7 +4,7 @@ import {WorkspaceFolder} from 'vscode-languageserver/node';
 import {URI} from 'vscode-uri';
 
 import {SemanticTokensParams2} from '../interfaces';
-import {LibFile, loadZinniaLibs} from '../lib';
+import {LibFile, loadZinniaLibs, normalizePath} from '../lib';
 
 import {ParseProblem, parseModule} from './parser';
 import {generateSemanticTokens, SemanticContext, SemanticIdentifier, SemanticImport, SemanticModule, SemanticToken} from './semantic';
@@ -42,7 +42,7 @@ export function* findZnFiles(dir: string): Generator<string> {
         yield* findZnFiles(path.join(dir, entry.name));
       }
     } else if (entry.name.endsWith('.zn')) {
-      yield path.join(dir, entry.name).replace(/\\/g, '/');
+      yield normalizePath(path.join(dir, entry.name));
     }
   }
 }
@@ -62,7 +62,7 @@ function importsIn(text: string): {name: string, isPath: boolean}[] {
 
 // The path, with '/' separators, of the file at [uri].
 export function filePathOf(uri: string): string {
-  return URI.parse(uri).fsPath.replace(/\\/g, '/');
+  return normalizePath(URI.parse(uri).fsPath);
 }
 
 export class SemanticAnalyzer {
@@ -92,7 +92,7 @@ export class SemanticAnalyzer {
       Promise<void> {
     try {
       this.workspacePaths_ = workspaceFolders.map(
-          wf => URI.parse(wf.uri).fsPath.replace(/\\/g, '/'));
+          wf => filePathOf(wf.uri));
       const libs = await loadLibs();
       // Analyze builtin first, so the other modules' uses of builtins resolve.
       libs.sort((a, b) => Number(b.name === 'builtin') - Number(a.name === 'builtin'));
@@ -123,7 +123,7 @@ export class SemanticAnalyzer {
       return this.docs_.get(libPath);
     }
     for (const dir of [...this.workspacePaths_, path.dirname(fromPath)]) {
-      const filePath = path.join(dir, name + '.zn').replace(/\\/g, '/');
+      const filePath = normalizePath(path.join(dir, name + '.zn'));
       if (this.docs_.has(filePath)) {
         return this.docs_.get(filePath);
       }
@@ -144,7 +144,7 @@ export class SemanticAnalyzer {
       return [];
     }
     return [...this.workspacePaths_, path.dirname(fromPath)].map(
-        dir => path.join(dir, name + '.zn').replace(/\\/g, '/'));
+        dir => normalizePath(path.join(dir, name + '.zn')));
   }
 
   // The workspace file that an import of [name] in the file at [fromPath]
@@ -249,7 +249,10 @@ export class SemanticAnalyzer {
   // workspace files that import it. Returns the paths of the files
   // reanalyzed.
   refreshFile(filePath: string): string[] {
-    if (this.isStandardLibraryFile(filePath)) {
+    // A standard library module is only reanalyzed if it's the one loaded and
+    // its text changed, e.g. after an edit in the editor was discarded.
+    const isLib = this.isStandardLibraryFile(filePath);
+    if (isLib && !this.docs_.has(filePath)) {
       return [];
     }
     const reanalyzed: string[] = [];
@@ -258,7 +261,10 @@ export class SemanticAnalyzer {
       try {
         text = readFileSync(filePath, 'utf8');
       } catch {
-        return this.forgetFile(filePath);
+        return isLib ? [] : this.forgetFile(filePath);
+      }
+      if (isLib && this.docs_.get(filePath)?.text === text) {
+        return [];
       }
       this.parseDocumentText_(filePath, text);
       reanalyzed.push(filePath);
@@ -279,11 +285,15 @@ export class SemanticAnalyzer {
 
   // The analyzed workspace files that import [filePath].
   importersOf(filePath: string): SemanticDocInfo[] {
+    // Any file may use a standard library module without importing it,
+    // through builtin's imports.
+    const isLib = this.isStandardLibraryFile(filePath);
     return [...this.docs_.values()].filter(
         doc => doc.path !== filePath && !this.isStandardLibraryFile(doc.path) &&
-            importsIn(doc.text).some(
-                i => this.importCandidates_(doc.path, i.name, i.isPath)
-                         .includes(filePath)));
+            (isLib ||
+             importsIn(doc.text).some(
+                 i => this.importCandidates_(doc.path, i.name, i.isPath)
+                          .includes(filePath))));
   }
 
   // Reanalyzes the files that import [filePath], with the text they were last
@@ -333,7 +343,7 @@ export class SemanticAnalyzer {
     }
     for (const dir of [...this.workspacePaths_, path.dirname(fromPath)]) {
       const info =
-          this.docs_.get(path.join(dir, name + '.zn').replace(/\\/g, '/'));
+          this.docs_.get(normalizePath(path.join(dir, name + '.zn')));
       if (info !== undefined) {
         return info;
       }
@@ -436,6 +446,14 @@ export class SemanticAnalyzer {
       text = params.text!;
     } else {
       text = readFileSync(path).toString();
+    }
+    // A standard library module opened unchanged, as when the editor shows it
+    // for a definition, keeps its analysis. Analyzing it again would replace
+    // the identifiers that every other file's uses of it refer to.
+    const existing = this.docs_.get(path);
+    if (existing !== undefined && existing.text === text &&
+        this.isStandardLibraryFile(path)) {
+      return existing;
     }
     return this.parseDocumentText_(path, text);
   }
