@@ -5,7 +5,8 @@ import * as path from 'path';
 import {CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, DocumentHighlight, DocumentHighlightKind, InlayHint, InlayHintKind, Range, SymbolKind} from 'vscode-languageserver/node';
 import {URI} from 'vscode-uri';
 
-import {identifierSignature} from './completion';
+import {identifierSignature, receiverType} from './completion';
+import {nativeMethodsOf} from './semantics/natives';
 import {renameLocations} from './rename';
 import {SemanticAnalyzer, SemanticDocInfo} from './semantics/analyzer';
 import {resolved, SemanticIdentifier, SemanticToken, TokenFile} from './semantics/semantic';
@@ -392,4 +393,61 @@ export function inlayHints(
   return hints.sort(
       (a, b) => a.position.line - b.position.line ||
           a.position.character - b.position.character);
+}
+
+// A place to go to, with 0-based positions.
+export interface DefinitionLocation {
+  filePath: string;
+  row: number;
+  col: number;
+  length: number;
+}
+
+// Returns where the name [token] of [info] is defined:
+// - for a module's name, the module's file;
+// - for a native method of an object whose class is inferred, the class,
+//   since the method has no source;
+// - for anything else, its declaration, unless it has none in source.
+export function definitionOf(
+    info: SemanticDocInfo, token: SemanticToken|undefined,
+    analyzer: SemanticAnalyzer): DefinitionLocation|undefined {
+  if (token === undefined) {
+    return undefined;
+  }
+  if (token.identifier === undefined) {
+    const before = (info.text.split(/\r?\n/)[token.row] ?? '').slice(0, token.col);
+    const receiver = /([A-Za-z_$][\w$]*)\s*\.\s*$/.exec(before)?.[1];
+    // A string literal, as in 'a'.trim(), is a String.
+    const type = /'\s*\.\s*$/.test(before) ?
+        {name: 'String', cls: analyzer.searchBuiltinForId('String')?.cls} :
+        receiver && receiverType(info, receiver, token.row, token.col, analyzer);
+    const declaration = type && type.cls !== undefined &&
+        nativeMethodsOf(type.name)[token.text] !== undefined ?
+        type.cls.name.tokens[0] :
+        undefined;
+    return declaration && locationOfToken(declaration);
+  }
+  const id = resolved(token.identifier);
+  if (id.importSource !== undefined) {
+    const declaration = id.tokens[0];
+    const module = analyzer.analyzedImport(
+        declaration?.filePath ?? info.path, id.importSource.name, id.importSource.isPath);
+    if (module !== undefined) {
+      return {filePath: module.path, row: 0, col: 0, length: 0};
+    }
+  }
+  if (id.isUndefined) {
+    return undefined;
+  }
+  const declaration = id.tokens[0];
+  return declaration && locationOfToken(declaration);
+}
+
+function locationOfToken(tok: TokenFile): DefinitionLocation {
+  return {
+    filePath: tok.filePath,
+    row: tok.token.pos.rowBegin - 1,
+    col: tok.token.pos.columnBegin - 1,
+    length: tok.token.text.length,
+  };
 }

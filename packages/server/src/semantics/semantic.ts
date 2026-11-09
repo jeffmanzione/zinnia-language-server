@@ -61,6 +61,9 @@ export class SemanticIdentifier {
   // For a function or method: the values it returns, from which the class of
   // its result is inferred.
   returns: ReturnValue[] = [];
+  // Whether this stands for a name used without a definition in source, such
+  // as one defined natively (Int) or one that's undefined.
+  isUndefined = false;
 
   constructor(
       ast: IdentifierExpr, type: IdType, modifiers: string[] = [],
@@ -540,6 +543,7 @@ class Block {
             {kind: 'IdentifierExpr', token: name}, 'variable', [], name.text),
         uses: [],
       };
+      unresolved.id.isUndefined = true;
       this.unresolved.set(name.text, unresolved);
       this.file.unresolved.push(unresolved);
     }
@@ -968,13 +972,16 @@ function walkChain(
     onMember?: (token: Token, member: SemanticIdentifier|undefined,
                 receiver: InferredType|undefined) => void): InferredType|
     undefined {
-  if (depth > MAX_INFERENCE_DEPTH || !(postfix.base instanceof SemanticIdentifier)) {
+  if (depth > MAX_INFERENCE_DEPTH) {
     return undefined;
   }
   const selfClass = postfix.selfClass && resolved(postfix.selfClass).cls;
+  // A chain can start with a literal, as in 'a'.trim(), as well as a name.
   let state: ChainState = selfClass !== undefined ?
       {kind: 'value', type: {name: selfClass.name.id, cls: selfClass}} :
-      stateOf(postfix.base, analyzer, depth);
+      postfix.base instanceof SemanticIdentifier ?
+      stateOf(postfix.base, analyzer, depth) :
+      {kind: 'value', type: inferType(postfix.base as SemanticExpression, analyzer, depth + 1)};
   for (const pfx of postfix.ast.postfixes) {
     if (pfx.kind === 'MemberAccessExpr') {
       const token = pfx.field.token;
@@ -1332,6 +1339,12 @@ function generateTokensForImport(
     generator.createToken(imprt.ast.source.token, 'string');
   } else {
     generateTokensForIdentifier(imprt.name, context, generator);
+    if (imprt.ast.name != null) {
+      // The module's own name in `import json as j` refers to the import too.
+      generator.createToken(
+          imprt.ast.source.token, 'variable', ['defaultLibrary'], undefined,
+          undefined, resolved(imprt.name));
+    }
   }
 }
 

@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import {before, describe, it} from 'node:test';
 
 import {formatRows} from '../format';
-import {documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from '../navigation';
+import {definitionOf, documentHighlights, incomingCalls, inlayHints, outgoingCalls, prepareCallHierarchy} from '../navigation';
 import {SemanticAnalyzer, SemanticDocInfo} from '../semantics/analyzer';
 
 const LIBS = [
@@ -109,5 +109,47 @@ describe('range formatting', () => {
     assert.deepEqual(
         formatRows('if x {\n  y\nz\n}\n', {tabSize: 2, insertSpaces: true}, 2, 3),
         [{row: 2, newText: '  z'}]);
+  });
+});
+
+describe('go to definition', () => {
+  const LIBS = [
+    {name: 'builtin', path: '/stdlib/builtin.zn', text: 'import io\nfunction cat(args) args\nclass String {}\n'},
+    {name: 'io', path: '/stdlib/io.zn', text: 'function println(a) a\n'},
+    {name: 'json', path: '/stdlib/json.zn', text: '\nfunction jsonify(v) v\n'},
+  ];
+
+  async function definitionsAt(...lines: string[]) {
+    const analyzer = new SemanticAnalyzer();
+    await analyzer.init([], async () => LIBS);
+    const info = await analyzer.parseDocument(
+        {textDocument: {uri: 'file:///defs.zn'}, text: lines.join('\n') + '\n'});
+    return (row: number, col: number) => {
+      const tokens = info.tokens.filter(
+          t => t.row === row - 1 && t.col <= col - 1 && col - 1 < t.col + t.text.length);
+      const token = tokens.find(t => t.identifier !== undefined) ?? tokens[0];
+      const d = definitionOf(info, token, analyzer);
+      return d && `${path.basename(d.filePath)}:${d.row + 1}:${d.col + 1}`;
+    };
+  }
+
+  it('goes to the files of modules', async () => {
+    const at = await definitionsAt('import json as j', 'j.jsonify(1)', 'io.println(2)');
+    assert.equal(at(1, 8), 'json.zn:1:1');
+    assert.equal(at(1, 16), 'json.zn:1:1');
+    assert.equal(at(2, 1), 'json.zn:1:1');
+    assert.equal(at(2, 3), 'json.zn:2:10');
+    // io, which builtin imports.
+    assert.equal(at(3, 1), 'io.zn:1:1');
+    assert.equal(at(3, 4), 'io.zn:1:10');
+  });
+
+  it('goes to builtins, and to the class of a native method', async () => {
+    const at = await definitionsAt('x = cat(1)', 's = \'a\'', 't = s.split(\',\')', 'u = \'b\'.trim()', 'k = Int(3)');
+    assert.equal(at(1, 5), 'builtin.zn:2:10');
+    assert.equal(at(3, 7), 'builtin.zn:3:7');
+    assert.equal(at(4, 9), 'builtin.zn:3:7');
+    // Int is native, with no source.
+    assert.equal(at(5, 5), undefined);
   });
 });
