@@ -147,7 +147,13 @@
 		},
 		"string": {
 			"begin": "i?\\'",
-			"end": "(?<!\\\\)\\'",
+			"end": "\\'",
+			"patterns": [
+				{
+					"match": "\\\\.",
+					"name": "constant.character.escape"
+				}
+			],
 			"beginCaptures": {
 				"0": {
 					"name": "punctuation.definition.string.begin"

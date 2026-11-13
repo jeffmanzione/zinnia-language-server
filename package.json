@@ -134,7 +134,9 @@
 	"devDependencies": {
 		"@types/node": "^26.1.0",
 		"esbuild": "0.28.2",
-		"typescript": "^6.0.3"
+		"typescript": "^6.0.3",
+		"vscode-oniguruma": "^2.0.1",
+		"vscode-textmate": "^9.2.0"
 	},
 	"allowScripts": {
 		"esbuild@0.28.2": true

@@ -37,6 +37,20 @@ describe('callAt', () => {
     assert.equal(callAt(...cursor('x = [1, |')), undefined);
     assert.equal(callAt(...cursor('f(1)\ny = |')), undefined);
   });
+
+  it('skips strings with escaped quotes and backslashes, and comments', () => {
+    for (const [text, argIndex] of [
+      ["f('\\\\', |", 1],
+      ["f('it\\'s (', |", 1],
+      ["f(i'\\\\(', '\\n', |", 2],
+      ['f(1, ; (a comment\n  |', 1],
+      ['f(1, /* (, */ |', 1],
+    ] as const) {
+      assert.deepEqual(callAt(...cursor(text)), {receiver: undefined, name: 'f', argIndex}, text);
+    }
+    assert.deepEqual(
+        callAt(...cursor("g(1)\nx = '\\\\'\nf(|")), {receiver: undefined, name: 'f', argIndex: 0});
+  });
 });
 
 describe('member completion and signatures', () => {
