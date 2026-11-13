@@ -34,11 +34,46 @@ export interface CallAt {
   argIndex: number;
 }
 
+// Which of the first [end] characters of [text] are in a string or a comment.
+// Strings may hold escaped quotes and backslashes, as in '\'' and '\\', so they
+// are found from the start.
+function stringsAndComments(text: string, end: number): boolean[] {
+  const skipped = new Array<boolean>(end).fill(false);
+  for (let i = 0; i < end; i++) {
+    const c = text[i];
+    let close: number|undefined;
+    if (c === '\'') {
+      close = i + 1;
+      while (close < end && text[close] !== '\'') {
+        close += text[close] === '\\' ? 2 : 1;
+      }
+    } else if (c === ';') {
+      close = text.indexOf('\n', i);
+      close = close < 0 ? end : close - 1;
+    } else if (c === '/' && text[i + 1] === '*') {
+      close = text.indexOf('*/', i + 2);
+      close = close < 0 ? end : close + 1;
+    }
+    if (close !== undefined) {
+      for (let j = i; j <= close && j < end; j++) {
+        skipped[j] = true;
+      }
+      i = close;
+    }
+  }
+  return skipped;
+}
+
 // Returns the innermost call whose arguments contain [offset] in [text].
 export function callAt(text: string, offset: number): CallAt|undefined {
   let depth = 0;
   let argIndex = 0;
+  // Brackets and commas in strings and comments don't count.
+  const skipped = stringsAndComments(text, offset);
   for (let i = offset - 1; i >= 0; i--) {
+    if (skipped[i]) {
+      continue;
+    }
     const c = text[i];
     if (c === ')' || c === ']' || c === '}') {
       depth++;
@@ -63,13 +98,6 @@ export function callAt(text: string, offset: number): CallAt|undefined {
     } else if (c === '\n' && depth === 0 && /[)}]\s*$/.test(text.slice(0, i))) {
       // A line that ends a statement can't be inside this call.
       return undefined;
-    } else if (c === '\'') {
-      // Skip a string literal, which may contain brackets and commas.
-      const start = text.lastIndexOf('\'', i - 1);
-      if (start < 0) {
-        return undefined;
-      }
-      i = start;
     }
   }
   return undefined;
