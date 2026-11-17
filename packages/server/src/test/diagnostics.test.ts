@@ -96,6 +96,37 @@ describe('undefined names', () => {
   });
 });
 
+describe('function-wide variables', () => {
+  it('defines variables first assigned in loops and try for the rest of the function', async () => {
+    assert.deepEqual(
+        await problems(
+            'function f(items) {',
+            '  for (_, item) in items {',
+            '    last = item',
+            '  }',
+            '  while False { w = 1 }',
+            '  try {',
+            '    t = 1',
+            '  } catch e {}',
+            '  if True { b = 1 }',
+            '  return cat(item, last, w, t, e, b)',
+            '}',
+        ),
+        []);
+  });
+
+  it('keeps lambdas\' variables to themselves', async () => {
+    assert.deepEqual(
+        await problems(
+            'f = () {',
+            '  inner = 1',
+            '}',
+            'g = inner',
+        ),
+        ['4:5 \'inner\' is not defined.']);
+  });
+});
+
 describe('builtin\'s imports', () => {
   it('are visible in every module, as the runtime looks names up in builtin\'s members', async () => {
     const analyzer = new SemanticAnalyzer();

@@ -2116,46 +2116,44 @@ function checkUnused(
 
 function processStatement(
     stat: Statement, context: SemanticContext): SemanticStatement {
+  // Variables are function-wide: blocks, branches, loops and `try` define
+  // theirs in the enclosing function or module, not in a scope of their own.
   if (stat.kind === 'CompoundStat') {
-    const newContext = context.newBlock();
     checkReachable(stat, context);
     return {
       ast: stat,
-      stats: stat.stats.map(s => processStatement(s, newContext))
+      stats: stat.stats.map(s => processStatement(s, context))
     };
   } else if (stat.kind === 'SelectStat') {
     return {
       ast: stat,
       cond: processStatement(stat.cond, context),
-      ifTrue: processStatement(stat.ifTrue, context.newBlock()),
+      ifTrue: processStatement(stat.ifTrue, context),
       ifFalse: stat.elseTok != null ?
-          processStatement(stat.ifFalse!, context.newBlock()) :
+          processStatement(stat.ifFalse!, context) :
           undefined
     };
   } else if (stat.kind === 'WhileStat') {
-    const newContext = context.newBlock();
     return {
       ast: stat,
-      cond: processExpression(stat.cond, newContext),
-      body: processStatement(stat.stat, newContext)
+      cond: processExpression(stat.cond, context),
+      body: processStatement(stat.stat, context)
 
     };
   } else if (stat.kind === 'ForStat') {
-    const newContext = context.newBlock();
     return {
       ast: stat,
-      first: processExpression(stat.first, newContext),
-      second: processExpression(stat.second, newContext),
-      third: processExpression(stat.third, newContext),
-      body: processStatement(stat.stat, newContext)
+      first: processExpression(stat.first, context),
+      second: processExpression(stat.second, context),
+      third: processExpression(stat.third, context),
+      body: processStatement(stat.stat, context)
     };
   } else if (stat.kind === 'ForeachStat') {
-    const newContext = context.newBlock();
     return {
       ast: stat,
-      lhs: processAssignLhs(stat.lhs, newContext),
-      rhs: processExpression(stat.iter, newContext),
-      body: processStatement(stat.stat, newContext)
+      lhs: processAssignLhs(stat.lhs, context),
+      rhs: processExpression(stat.iter, context),
+      body: processStatement(stat.stat, context)
     };
   } else if (stat.kind === 'JumpStat') {
     const expr = stat.expr == null ? undefined : processExpression(stat.expr, context);
@@ -2168,13 +2166,11 @@ function processStatement(
     }
     return {ast: stat, expr: expr};
   } else if (stat.kind === 'TryStat') {
-    const tryContext = context.newBlock();
-    const catchContext = context.newBlock();
     return {
       ast: stat,
-      tryStat: processStatement(stat.stat, tryContext),
-      catchAssign: mayBeUnused(processAssignLhs(stat.catchAssign, catchContext), catchContext),
-      catchStat: processStatement(stat.catchStat, catchContext)
+      tryStat: processStatement(stat.stat, context),
+      catchAssign: mayBeUnused(processAssignLhs(stat.catchAssign, context), context),
+      catchStat: processStatement(stat.catchStat, context)
     };
   } else if (stat.kind === 'RaiseStat') {
     return {ast: stat, expr: processExpression(stat.expr, context)};
